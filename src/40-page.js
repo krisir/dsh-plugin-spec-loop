@@ -76,13 +76,17 @@ function LogEntry({ t, entry }) {
 
 /**
  * One change card: status, progress, the actions that apply to it, and its log.
- * @param {object} props - `t`, `sessionId`, `change`, `loop`, and the open state.
+ * @param {object} props - `t`, `sessionId`, `change`, `loop`, the open state, and
+ *   the session-navigation pair `openSession` / `canOpenSession`.
  * @returns {object} the element.
  */
-function ChangeCard({ t, sessionId, change, loop, open, onToggle }) {
+function ChangeCard({ t, sessionId, change, loop, open, onToggle, openSession, canOpenSession }) {
 	const [roundsDraft, setRoundsDraft] = React.useState(null);
 	const [confirming, setConfirming] = React.useState(false);
 	const [copied, setCopied] = React.useState(false);
+	// Asked on every render rather than latched: the shell may gain the workspace
+	// domain after this card first painted.
+	const canJump = typeof canOpenSession === 'function' && canOpenSession() === true;
 
 	const roundsValue = roundsDraft ?? String(change.maxIterations);
 	const roundsDirty = roundsDraft !== null && Number.parseInt(roundsDraft, 10) !== change.maxIterations;
@@ -107,6 +111,21 @@ function ChangeCard({ t, sessionId, change, loop, open, onToggle }) {
 		} catch {
 			/* A clipboard that refuses simply does not confirm. */
 		}
+	};
+
+	/**
+	 * Reveal the session this change's rounds run in.
+	 *
+	 * Opening is the point of the chip — a round is an ordinary conversation and
+	 * watching it is how you tell "working" from "stuck". Copying is only the
+	 * fallback for a shell with no session navigation, so that the id is never
+	 * stranded in a tooltip the way it was when this only copied.
+	 */
+	const revealSession = () => {
+		if (canJump && typeof openSession === 'function') {
+			if (openSession(change.sessionId) === true) return;
+		}
+		copySession();
 	};
 
 	return h(
@@ -189,10 +208,14 @@ function ChangeCard({ t, sessionId, change, loop, open, onToggle }) {
 						{
 							type: 'button',
 							className: 'sl-btn sl-btn-quiet sl-mono',
-							title: `${t('card.openSession')}: ${change.sessionId}`,
-							onClick: copySession,
+							// Say which of the two actions this click will take. A tooltip that
+							// promises a jump and performs a copy is worse than no tooltip.
+							title: canJump
+								? `${t('card.openSession')}: ${change.sessionId}`
+								: `${t('card.copySession')}: ${change.sessionId}`,
+							onClick: revealSession,
 						},
-						copied ? '✓' : `◈ ${change.sessionId.slice(0, 8)}`,
+						copied ? '✓' : `${canJump ? '▶' : '◈'} ${shortSessionId(change.sessionId)}`,
 					)
 				: null,
 			h(
@@ -718,10 +741,11 @@ function DiscussionPanel({ t, sessionId, loop, discussion }) {
  * discussion, the plan and the change list — unrendered by every test. This takes
  * the snapshot as a prop instead, so a test can put the page in any state at all.
  *
- * @param {object} props - `t`, `sessionId`, `loop`, and the current snapshot.
+ * @param {object} props - `t`, `sessionId`, `loop`, the current snapshot, and the
+ *   session-navigation pair handed down to every card.
  * @returns {object} the element.
  */
-function SpecLoopView({ t, sessionId, loop, state }) {
+function SpecLoopView({ t, sessionId, loop, state, openSession, canOpenSession }) {
 	const [showSettings, setShowSettings] = React.useState(false);
 	const [openIds, setOpenIds] = React.useState({});
 
@@ -842,6 +866,8 @@ function SpecLoopView({ t, sessionId, loop, state }) {
 							loop,
 							open: openIds[change.id] === true,
 							onToggle: toggleDetails,
+							openSession,
+							canOpenSession,
 						}),
 					),
 				),
@@ -855,7 +881,7 @@ function SpecLoopView({ t, sessionId, loop, state }) {
  * @param {object} props - `t` from the locale namespace, `sessionId` from the slot.
  * @returns {object} the element.
  */
-function SpecLoopPage({ t, sessionId }) {
+function SpecLoopPage({ t, sessionId, openSession, canOpenSession }) {
 	const loop = useLoopState(sessionId);
-	return h(SpecLoopView, { t, sessionId, loop, state: loop.state });
+	return h(SpecLoopView, { t, sessionId, loop, state: loop.state, openSession, canOpenSession });
 }

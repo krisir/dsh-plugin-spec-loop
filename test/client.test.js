@@ -124,8 +124,151 @@ test('applying the client plugin registers one view at order 30 and installs its
 	assert.equal(registrations[0].options.order, 30);
 	assert.equal(registrations[0].options.locale, 'specLoop');
 	assert.equal(registrations[0].options.label(), 'view.label');
-	assert.deepEqual(registrations[0].options.inject('session-1'), { sessionId: 'session-1' });
+	const props = registrations[0].options.inject('session-1');
+	assert.equal(props.sessionId, 'session-1');
+	assert.equal(typeof props.openSession, 'function');
+	// This shell has no `uiWorkspace`, so the jump is unavailable — and the page
+	// has to know that before it renders, because the chip's tooltip differs.
+	assert.equal(props.canOpenSession(), false);
+	assert.equal(props.openSession('session-9'), false, 'and the call is a no-op, not a throw');
 	assert.equal(typeof registrations[0].component, 'function');
 	assert.ok(effects.some((label) => String(label).includes('stylesheet')));
 	assert.ok(effects.some((label) => String(label).includes('dictionaries')));
+});
+
+test('a shell with the workspace domain gets a working jump to the session', () => {
+	const bundle = readFileSync(join(root, 'client.js'), 'utf8');
+	let captured;
+	globalThis.window = { __ModuleLoader__: { load: (module) => { captured = module; } } };
+	try {
+		// eslint-disable-next-line no-new-func
+		new Function(bundle)();
+	} finally {
+		delete globalThis.window;
+	}
+	const react = {
+		createElement: (...args) => ({ args }),
+		useState: (value) => [value, () => {}],
+		useEffect: () => {},
+		useLayoutEffect: () => {},
+		useRef: (value) => ({ current: value }),
+		useCallback: (fn) => fn,
+		useMemo: (fn) => fn(),
+	};
+	const exports = captured.factory(() => react);
+
+	const opened = [];
+	const registrations = [];
+	const ctx = {
+		effect: (fn) => fn(),
+		locale: { register: () => {}, bind: () => (key) => key },
+		get: (key) => (key === 'uiWorkspace' ? { openSession: (id) => opened.push(id) } : undefined),
+		slots: {
+			inject: (slot, fn) => fn(),
+			register: (options, component) => {
+				registrations.push({ options, component });
+				return () => {};
+			},
+		},
+	};
+	exports.apply(ctx);
+
+	const props = registrations[0].options.inject('session-1');
+	assert.equal(props.canOpenSession(), true);
+	assert.equal(props.openSession('session-9'), true);
+	assert.deepEqual(opened, ['session-9']);
+});
+
+test('a jump the shell refuses is reported instead of being swallowed', () => {
+	const bundle = readFileSync(join(root, 'client.js'), 'utf8');
+	let captured;
+	globalThis.window = { __ModuleLoader__: { load: (module) => { captured = module; } } };
+	try {
+		// eslint-disable-next-line no-new-func
+		new Function(bundle)();
+	} finally {
+		delete globalThis.window;
+	}
+	const react = {
+		createElement: (...args) => ({ args }),
+		useState: (value) => [value, () => {}],
+		useEffect: () => {},
+		useLayoutEffect: () => {},
+		useRef: (value) => ({ current: value }),
+		useCallback: (fn) => fn,
+		useMemo: (fn) => fn(),
+	};
+	const exports = captured.factory(() => react);
+
+	const registrations = [];
+	const ctx = {
+		effect: (fn) => fn(),
+		locale: { register: () => {}, bind: () => (key) => key },
+		get: () => ({
+			openSession: () => {
+				throw new Error('navigation refused');
+			},
+		}),
+		slots: {
+			inject: (slot, fn) => fn(),
+			register: (options, component) => {
+				registrations.push({ options, component });
+				return () => {};
+			},
+		},
+	};
+	exports.apply(ctx);
+
+	// `false` is what makes the card fall back to copying the id, so the click can
+	// never do nothing at all.
+	assert.equal(registrations[0].options.inject('session-1').openSession('session-9'), false);
+});
+
+test('the jump capability is re-asked, so a late workspace domain is still noticed', () => {
+	const bundle = readFileSync(join(root, 'client.js'), 'utf8');
+	let captured;
+	globalThis.window = { __ModuleLoader__: { load: (module) => { captured = module; } } };
+	try {
+		// eslint-disable-next-line no-new-func
+		new Function(bundle)();
+	} finally {
+		delete globalThis.window;
+	}
+	const react = {
+		createElement: (...args) => ({ args }),
+		useState: (value) => [value, () => {}],
+		useEffect: () => {},
+		useLayoutEffect: () => {},
+		useRef: (value) => ({ current: value }),
+		useCallback: (fn) => fn,
+		useMemo: (fn) => fn(),
+	};
+	const exports = captured.factory(() => react);
+
+	// `ui-workspace` is a separate client plugin and this one only declares
+	// `slots`/`locale`, so it can genuinely apply second. A capability latched at
+	// apply() time would leave the chip permanently degraded.
+	let available;
+	const opened = [];
+	const registrations = [];
+	const ctx = {
+		effect: (fn) => fn(),
+		locale: { register: () => {}, bind: () => (key) => key },
+		get: (key) => (key === 'uiWorkspace' && available === true ? { openSession: (id) => opened.push(id) } : undefined),
+		slots: {
+			inject: (slot, fn) => fn(),
+			register: (options, component) => {
+				registrations.push({ options, component });
+				return () => {};
+			},
+		},
+	};
+	exports.apply(ctx);
+	const props = registrations[0].options.inject('session-1');
+
+	assert.equal(props.canOpenSession(), false, 'not there yet');
+	available = true;
+	assert.equal(props.canOpenSession(), true, 'and noticed as soon as it is');
+	assert.equal(props.openSession('session-9'), true);
+	assert.deepEqual(opened, ['session-9']);
 });

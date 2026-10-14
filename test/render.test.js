@@ -330,6 +330,62 @@ test('the confirm button is disabled when nothing is selected', { skip: !availab
 	assert.match(markup, /proposal\.confirm\(\{&quot;count&quot;:0\}\)/);
 });
 
+test('a session chip promises the jump when the shell can jump', { skip: !available }, () => {
+	const { ChangeCard } = loadComponents();
+	const opened = [];
+	const markup = render(
+		React.createElement(ChangeCard, {
+			t,
+			sessionId: 's',
+			change: change({ sessionId: 'session-6e1f7728-f155-4a07-88ec-e32bcf61cf39' }),
+			loop,
+			open: false,
+			onToggle: () => {},
+			canOpenSession: () => true,
+			openSession: (id) => {
+				opened.push(id);
+				return true;
+			},
+		}),
+	);
+	// The chip has to say which of its two actions a click will take, and it has to
+	// carry the whole id — the prefix alone is not enough to find the session.
+	assert.match(markup, /card\.openSession/);
+	assert.match(markup, /▶ 6e1f7728/);
+	assert.match(markup, /session-6e1f7728-f155-4a07-88ec-e32bcf61cf39/);
+	assert.deepEqual(opened, [], 'rendering is not clicking');
+});
+
+test('a session chip offers the id instead when the shell cannot jump', { skip: !available }, () => {
+	const { ChangeCard } = loadComponents();
+	const markup = render(
+		React.createElement(ChangeCard, {
+			t,
+			sessionId: 's',
+			change: change({ sessionId: 'session-6e1f7728-f155-4a07-88ec-e32bcf61cf39' }),
+			loop,
+			open: false,
+			onToggle: () => {},
+			canOpenSession: () => false,
+			openSession: () => false,
+		}),
+	);
+	assert.match(markup, /card\.copySession/);
+	assert.doesNotMatch(markup, /card\.openSession/);
+	assert.match(markup, /◈ 6e1f7728/);
+});
+
+test('a change that has not run a round yet shows no session chip', { skip: !available }, () => {
+	const { ChangeCard } = loadComponents();
+	const markup = render(
+		React.createElement(ChangeCard, { t, sessionId: 's', change: change({ sessionId: '' }), loop, open: false, onToggle: () => {} }),
+	);
+	// The session is created when the first round starts, so there is nothing to
+	// reveal before that — and an empty chip would read as a broken one.
+	assert.doesNotMatch(markup, /card\.openSession/);
+	assert.doesNotMatch(markup, /card\.copySession/);
+});
+
 test('the settings panel renders every field the host accepts', { skip: !available }, () => {
 	const { SettingsPanel } = loadComponents();
 	const markup = render(

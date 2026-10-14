@@ -23,6 +23,31 @@ function apply(ctx) {
 	ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'spec-loop: dictionaries');
 	ctx.effect(() => installStyles(), 'spec-loop: stylesheet');
 
+	// Reading `uiWorkspace` optionally rather than injecting it is deliberate. It
+	// is what turns a change's session chip into a jump to that session, and the
+	// session is where you actually watch a round happen — but a shell without the
+	// workspace domain should lose the jump, not the whole page. So the capability
+	// is probed, and the chip falls back to copying the id.
+	//
+	// The probe is a function rather than a boolean read once here, because this
+	// plugin declares only `slots` and `locale`: `ui-workspace` may well apply
+	// *after* it, and a value captured now would pin the answer to whoever happened
+	// to be first. Asking at render time instead makes the chip correct whenever it
+	// is looked at, and the page re-renders on every poll.
+	const workspace = () => ctx.get?.('uiWorkspace');
+	const canOpenSession = () => typeof workspace()?.openSession === 'function';
+	const openSession = (id) => {
+		const ui = workspace();
+		if (typeof ui?.openSession !== 'function') return false;
+		try {
+			ui.openSession(id);
+			return true;
+		} catch {
+			// A navigation the shell refuses leaves the chip to its fallback.
+			return false;
+		}
+	};
+
 	// `label` is what the shell projects into the tab row; without it the tab would
 	// read as the raw slot id. `inject` receives the session id, which is what makes
 	// the page a *project's* page: the id travels with every request and the Host
@@ -37,7 +62,7 @@ function apply(ctx) {
 				order: 30,
 				locale: NS,
 				label: () => label('view.label'),
-				inject: (sessionId) => ({ sessionId }),
+				inject: (sessionId) => ({ sessionId, openSession, canOpenSession }),
 			},
 			SpecLoopPage,
 		),

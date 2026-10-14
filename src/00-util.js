@@ -113,3 +113,21 @@ function clip(value, limit) {
 function toneOf(status) {
 	return STATUS_TONE[status] ?? 'idle';
 }
+
+/**
+ * The distinguishing part of a session id, for a button label.
+ *
+ * Taking a plain prefix of the whole id renders the same eight characters for
+ * every session the Host ever creates, because they all begin with `session-`:
+ * a row of `session-` chips tells you nothing about which one is which. So the
+ * shared prefix comes off first, and the budget is spent on the part that varies.
+ *
+ * @param {unknown} id - the session id.
+ * @returns {string} a short, distinguishing label.
+ */
+function shortSessionId(id) {
+	const text = typeof id === 'string' ? id : '';
+	const prefix = 'session-';
+	const body = text.startsWith(prefix) ? text.slice(prefix.length) : text;
+	return body.slice(0, 8);
+}

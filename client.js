@@ -132,6 +132,24 @@ function clip(value, limit) {
 function toneOf(status) {
 	return STATUS_TONE[status] ?? 'idle';
 }
+
+/**
+ * The distinguishing part of a session id, for a button label.
+ *
+ * Taking a plain prefix of the whole id renders the same eight characters for
+ * every session the Host ever creates, because they all begin with `session-`:
+ * a row of `session-` chips tells you nothing about which one is which. So the
+ * shared prefix comes off first, and the budget is spent on the part that varies.
+ *
+ * @param {unknown} id - the session id.
+ * @returns {string} a short, distinguishing label.
+ */
+function shortSessionId(id) {
+	const text = typeof id === 'string' ? id : '';
+	const prefix = 'session-';
+	const body = text.startsWith(prefix) ? text.slice(prefix.length) : text;
+	return body.slice(0, 8);
+}
 		//#endregion
 
 		//#region src/05-locale.js
@@ -208,6 +226,7 @@ const zh = {
 	'card.noTasks': '没有任务',
 	'card.session': '会话',
 	'card.openSession': '打开会话',
+	'card.copySession': '复制会话 id',
 	'card.start': '开始迭代',
 	'card.continue': '继续迭代',
 	'card.stop': '停止',
@@ -336,6 +355,7 @@ const en = {
 	'card.noTasks': 'No tasks',
 	'card.session': 'Session',
 	'card.openSession': 'Open session',
+	'card.copySession': 'Copy session id',
 	'card.start': 'Start',
 	'card.continue': 'Add rounds',
 	'card.stop': 'Stop',
@@ -1044,13 +1064,17 @@ function LogEntry({ t, entry }) {
 
 /**
  * One change card: status, progress, the actions that apply to it, and its log.
- * @param {object} props - `t`, `sessionId`, `change`, `loop`, and the open state.
+ * @param {object} props - `t`, `sessionId`, `change`, `loop`, the open state, and
+ *   the session-navigation pair `openSession` / `canOpenSession`.
  * @returns {object} the element.
  */
-function ChangeCard({ t, sessionId, change, loop, open, onToggle }) {
+function ChangeCard({ t, sessionId, change, loop, open, onToggle, openSession, canOpenSession }) {
 	const [roundsDraft, setRoundsDraft] = React.useState(null);
 	const [confirming, setConfirming] = React.useState(false);
 	const [copied, setCopied] = React.useState(false);
+	// Asked on every render rather than latched: the shell may gain the workspace
+	// domain after this card first painted.
+	const canJump = typeof canOpenSession === 'function' && canOpenSession() === true;
 
 	const roundsValue = roundsDraft ?? String(change.maxIterations);
 	const roundsDirty = roundsDraft !== null && Number.parseInt(roundsDraft, 10) !== change.maxIterations;
@@ -1075,6 +1099,21 @@ function ChangeCard({ t, sessionId, change, loop, open, onToggle }) {
 		} catch {
 			/* A clipboard that refuses simply does not confirm. */
 		}
+	};
+
+	/**
+	 * Reveal the session this change's rounds run in.
+	 *
+	 * Opening is the point of the chip — a round is an ordinary conversation and
+	 * watching it is how you tell "working" from "stuck". Copying is only the
+	 * fallback for a shell with no session navigation, so that the id is never
+	 * stranded in a tooltip the way it was when this only copied.
+	 */
+	const revealSession = () => {
+		if (canJump && typeof openSession === 'function') {
+			if (openSession(change.sessionId) === true) return;
+		}
+		copySession();
 	};
 
 	return h(
@@ -1157,10 +1196,14 @@ function ChangeCard({ t, sessionId, change, loop, open, onToggle }) {
 						{
 							type: 'button',
 							className: 'sl-btn sl-btn-quiet sl-mono',
-							title: `${t('card.openSession')}: ${change.sessionId}`,
-							onClick: copySession,
+							// Say which of the two actions this click will take. A tooltip that
+							// promises a jump and performs a copy is worse than no tooltip.
+							title: canJump
+								? `${t('card.openSession')}: ${change.sessionId}`
+								: `${t('card.copySession')}: ${change.sessionId}`,
+							onClick: revealSession,
 						},
-						copied ? '✓' : `◈ ${change.sessionId.slice(0, 8)}`,
+						copied ? '✓' : `${canJump ? '▶' : '◈'} ${shortSessionId(change.sessionId)}`,
 					)
 				: null,
 			h(
@@ -1686,10 +1729,11 @@ function DiscussionPanel({ t, sessionId, loop, discussion }) {
  * discussion, the plan and the change list — unrendered by every test. This takes
  * the snapshot as a prop instead, so a test can put the page in any state at all.
  *
- * @param {object} props - `t`, `sessionId`, `loop`, and the current snapshot.
+ * @param {object} props - `t`, `sessionId`, `loop`, the current snapshot, and the
+ *   session-navigation pair handed down to every card.
  * @returns {object} the element.
  */
-function SpecLoopView({ t, sessionId, loop, state }) {
+function SpecLoopView({ t, sessionId, loop, state, openSession, canOpenSession }) {
 	const [showSettings, setShowSettings] = React.useState(false);
 	const [openIds, setOpenIds] = React.useState({});
 
@@ -1810,6 +1854,8 @@ function SpecLoopView({ t, sessionId, loop, state }) {
 							loop,
 							open: openIds[change.id] === true,
 							onToggle: toggleDetails,
+							openSession,
+							canOpenSession,
 						}),
 					),
 				),
@@ -1823,9 +1869,9 @@ function SpecLoopView({ t, sessionId, loop, state }) {
  * @param {object} props - `t` from the locale namespace, `sessionId` from the slot.
  * @returns {object} the element.
  */
-function SpecLoopPage({ t, sessionId }) {
+function SpecLoopPage({ t, sessionId, openSession, canOpenSession }) {
 	const loop = useLoopState(sessionId);
-	return h(SpecLoopView, { t, sessionId, loop, state: loop.state });
+	return h(SpecLoopView, { t, sessionId, loop, state: loop.state, openSession, canOpenSession });
 }
 		//#endregion
 
@@ -1855,6 +1901,31 @@ function apply(ctx) {
 	ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'spec-loop: dictionaries');
 	ctx.effect(() => installStyles(), 'spec-loop: stylesheet');
 
+	// Reading `uiWorkspace` optionally rather than injecting it is deliberate. It
+	// is what turns a change's session chip into a jump to that session, and the
+	// session is where you actually watch a round happen — but a shell without the
+	// workspace domain should lose the jump, not the whole page. So the capability
+	// is probed, and the chip falls back to copying the id.
+	//
+	// The probe is a function rather than a boolean read once here, because this
+	// plugin declares only `slots` and `locale`: `ui-workspace` may well apply
+	// *after* it, and a value captured now would pin the answer to whoever happened
+	// to be first. Asking at render time instead makes the chip correct whenever it
+	// is looked at, and the page re-renders on every poll.
+	const workspace = () => ctx.get?.('uiWorkspace');
+	const canOpenSession = () => typeof workspace()?.openSession === 'function';
+	const openSession = (id) => {
+		const ui = workspace();
+		if (typeof ui?.openSession !== 'function') return false;
+		try {
+			ui.openSession(id);
+			return true;
+		} catch {
+			// A navigation the shell refuses leaves the chip to its fallback.
+			return false;
+		}
+	};
+
 	// `label` is what the shell projects into the tab row; without it the tab would
 	// read as the raw slot id. `inject` receives the session id, which is what makes
 	// the page a *project's* page: the id travels with every request and the Host
@@ -1869,7 +1940,7 @@ function apply(ctx) {
 				order: 30,
 				locale: NS,
 				label: () => label('view.label'),
-				inject: (sessionId) => ({ sessionId }),
+				inject: (sessionId) => ({ sessionId, openSession, canOpenSession }),
 			},
 			SpecLoopPage,
 		),

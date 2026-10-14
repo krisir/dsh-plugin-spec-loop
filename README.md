@@ -61,6 +61,17 @@
 
 **不限轮数。** 需求聊到清楚为止，没有"最多几轮"这种隐藏上限——限定轮数只会让 agent 在第 N 轮硬凑一个计划出来。想结束讨论有两个出口：让它出计划（`/spec plan`），或者放弃（`/spec cancel`）。
 
+### 一个 change 一个会话
+
+迭代**不是**在后台默默跑一段脚本，而是在一个普通会话里开一轮对话——所以你能像看别的会话一样看它，也能中途打断它。
+
+- **会话在第一次点「开始」时才建**，并且用 `cwd = 该 change 所在的工作区` 创建。这会话落在项目里，不是为了整洁，而是必须的：`openspec` 命令要靠 `cwd` 才能解析到同一个仓库，否则它会在插件的目录里找 `openspec/`。
+- **后续每一轮复用同一个会话**。change 记录上存着 `sessionId`，是持久化的，所以宿主重启之后再点「继续」也还是同一个会话，上下文不丢。
+- 只有这个会话真的没了（被删掉/归档掉），下一轮才会新建一个。
+- 每轮的提示词带着 `rpcId`（`spec-loop-<change>-<轮次>-<时间戳>`），所以在会话里能一眼看出哪一轮是哪一轮。
+
+页面上 change 卡片的 `▶ xxxxxxxx` 就是跳到这个会话的入口。
+
 ### 为什么一轮只传 `maxRounds: 1`
 
 `ralph` 工具自己会连跑多轮，但那样外层就看不到中间状态了——页面上根本没法在轮与轮之间刷新进度、判断卡住、或者让你中途停止。所以插件把 `ralph` 当成"跑一轮"的原语：轮与轮之间的推进由插件根据 `tasks.md` 决定。这样「迭代 3/5」在页面上就是字面意思。
@@ -105,7 +116,7 @@ node install.mjs uninstall --profile desktop
 
 ```bash
 node build.mjs      # src/*.js → client.js
-node --test test/   # 125 个测试
+node --test test/   # 131 个测试
 ```
 
 浏览器那一半的源码按文件名顺序拼接成一个 factory，所以**文件之间不能有相对 `require`**，只能用 `react`。`build.mjs` 会检查这一点。
@@ -137,7 +148,7 @@ pnpm install --dev
 | 开始 / 继续 / 重试 | 未跑过→开始；跑过但没做完→继续；已完成→重试 |
 | 轮数输入框 | 单个 change 的预算，1–50 |
 | 详情 | 逐轮记录（每轮的起止时间、勾选数变化、会话汇报摘要）+ `openspec validate` 输出 |
-| `◈ xxxxxxxx` | 点一下复制会话 id，方便去 `对话` 里看它到底干了什么 |
+| `▶ xxxxxxxx` | 点一下跳到这个 change 的会话，看这一轮到底在干什么。`xxxxxxxx` 是会话 id 里去掉公共前缀 `session-` 之后能区分彼此的那一段 —— 直接截前 8 位的话，每个会话都显示成一样的 `session-`。当客户端没有 `uiWorkspace` 时退化成 `◈ xxxxxxxx`（复制 id） |
 
 **设置** —— 默认轮数、并发数、单轮超时、无进展容忍轮数、是否自动跳过授权、`openspec` 命令路径。
 
@@ -210,12 +221,12 @@ pnpm install --dev
 node --test test/
 ```
 
-125 个测试：
+131 个测试：
 
 - **纯函数** —— `parseSpecCommand` / `normalizeProposal` / `renderTaskMarkdown` / `lintEntry` / `toKebab` / `renderObjective` / `normalizeSettings` / `parseTaskText` 等
 - **持久化** —— 原子写、损坏文件改名保留、未知状态归一化、讨论状态按 session 存取与淘汰
-- **客户端契约** —— 语言包 zh/en 键位对齐、页面用到的每个 key 都存在、bundle 只 `require('react')`、`apply` 注册出的 slot 条目（id / order / locale / label / inject）符合预期
-- **渲染** —— 用真实的 React 渲染真实的组件，断言每个状态、每种按钮文案、进度条的 `aria-valuenow`、日志顺序、讨论面板与待确认计划的每种形态，以及超长错误/摘要不会撑爆卡片
+- **客户端契约** —— 语言包 zh/en 键位对齐、页面用到的每个 key 都存在、bundle 只 `require('react')`、`apply` 注册出的 slot 条目（id / order / locale / label / inject）符合预期；会话跳转的三条：有 `uiWorkspace` 时能跳、没它时退化成复制、以及它**晚于**本插件装配时仍然会被认出来（能力是每次渲染现问的，不是在 `apply()` 里钉死的）
+- **渲染** —— 用真实的 React 渲染真实的组件，断言每个状态、每种按钮文案、进度条的 `aria-valuenow`、日志顺序、讨论面板与待确认计划的每种形态，超长错误/摘要不会撑爆卡片，以及会话 chip 的两种形态（能跳时 `▶` + tooltip 说「打开会话」，不能跳时 `◈` + tooltip 说「复制会话 id」）和「还没跑过就没有 chip」
 - **注册契约** —— 把 `commands.register()` / `tools.register()` 的准入规则照抄进测试（schema 子集、命令名字法、handler 返回值形状），断言插件真的交得出合格的定义。服务本身在 app 的模块图里，插件装完是 import 不到的；这份抄写不是权威，但能把"注册了一个会被注册表拒绝的工具"从用户会话里的运行时报错变成一条失败的测试
 - **装配** —— 用一个 stub context 真跑一遍 `apply()`：命令定义、工具定义、路由是否按各自的契约注册；`commands`/`tools` 服务缺失时仍然能加载；命令名撞车时只丢命令不丢插件；非 loopback 的写请求被拒
 - **端到端** —— 在一个临时项目上放一个假的 `openspec` 可执行文件，跑完整的 `/spec → 讨论 → 提交计划 → 确认 → 落盘` 全流程，以及 `RalphRunner` 按轮推进直到 `done`、预算耗尽变 `exhausted`、连续无进展变 `blocked`
