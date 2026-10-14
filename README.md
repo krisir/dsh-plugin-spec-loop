@@ -68,9 +68,32 @@
 - **会话在第一次点「开始」时才建**，并且用 `cwd = 该 change 所在的工作区` 创建。这会话落在项目里，不是为了整洁，而是必须的：`openspec` 命令要靠 `cwd` 才能解析到同一个仓库，否则它会在插件的目录里找 `openspec/`。
 - **后续每一轮复用同一个会话**。change 记录上存着 `sessionId`，是持久化的，所以宿主重启之后再点「继续」也还是同一个会话，上下文不丢。
 - 只有这个会话真的没了（被删掉/归档掉），下一轮才会新建一个。
+- **会话会被登记进该目录在侧边栏的工作区分组**（见下）。
 - 每轮的提示词带着 `rpcId`（`spec-loop-<change>-<轮次>-<时间戳>`），所以在会话里能一眼看出哪一轮是哪一轮。
 
 页面上 change 卡片的 `▶ xxxxxxxx` 就是跳到这个会话的入口。
+
+#### 为什么还要显式登记工作区分组
+
+这里有个容易踩的坑：**`sessionController.create({ cwd })` 只是给会话一个工作目录，并不会把它放进侧边栏的任何分组。** 工作区是用一份**显式的 `sessionIds` 账本**记着自己的会话的，"目录"和"分组"是两件事。
+
+注册表**确实**会按 `cwd` 认领游离的会话——但只在**首次使用的那一次性历史引导**里做（`workspace.json` 里的 `initialized` 标记）。引导跑完之后新建的会话不会再被认领，于是它会掉进「未分组」，而它和你自己的会话其实是同一个目录。
+
+所以插件建完会话后会自己登记一次：
+
+```js
+const workspace = await ctx.workspaceRegistry.resolveByPath(projectPath);
+if (workspace) await workspace.attachSession(sessionId);
+```
+
+`attachSession` 是 `Workspace` 接口上的公开方法，而且它会**再校验一遍**：读取会话存储的 `cwd`、做 `realpath` 归一化，必须等于工作区自己的规范路径才写入。`resolveByPath` 也走 `realpath`，两边用同一个 `projectPath` 就必然相等。
+
+两个刻意的选择：
+
+- **复用的会话也重新登记一次**，不只新建的。这次修改之前建出来的、还留在「未分组」里的老会话，下一次点「继续」就会自动归位，不用你手工收拾。
+- **目录没有工作区时不去替它建一个。** 注册工作区是对侧边栏可见的改动，点一下「开始迭代」不该顺手重排你的工作区。这种情况只记一行日志，会话保持未分组。
+
+登记失败不影响迭代：注册表写不动、会话的 `cwd` 已经不存在、目录中途被删——都只是少一个分组，不该让一轮失败。这几条路径都有测试。
 
 ### 为什么一轮只传 `maxRounds: 1`
 
@@ -126,7 +149,7 @@ node install.mjs uninstall --profile desktop
 
 ```bash
 node build.mjs      # src/*.js → client.js
-node --test test/   # 134 个测试
+node --test test/   # 137 个测试
 ```
 
 浏览器那一半的源码按文件名顺序拼接成一个 factory，所以**文件之间不能有相对 `require`**，只能用 `react`。`build.mjs` 会检查这一点。
@@ -231,7 +254,7 @@ pnpm install --dev
 node --test test/
 ```
 
-134 个测试：
+137 个测试：
 
 - **纯函数** —— `parseSpecCommand` / `normalizeProposal` / `renderTaskMarkdown` / `lintEntry` / `toKebab` / `renderObjective` / `normalizeSettings` / `parseTaskText` 等
 - **持久化** —— 原子写、损坏文件改名保留、未知状态归一化、讨论状态按 session 存取与淘汰
@@ -239,7 +262,7 @@ node --test test/
 - **渲染** —— 用真实的 React 渲染真实的组件，断言每个状态、每种按钮文案、进度条的 `aria-valuenow`、日志顺序、讨论面板与待确认计划的每种形态，超长错误/摘要不会撑爆卡片，以及会话 chip 的两种形态（能跳时 `▶` + tooltip 说「打开会话」，不能跳时 `◈` + tooltip 说「复制会话 id」）和「还没跑过就没有 chip」
 - **注册契约** —— 把 `commands.register()` / `tools.register()` 的准入规则照抄进测试（schema 子集、命令名字法、handler 返回值形状），断言插件真的交得出合格的定义。服务本身在 app 的模块图里，插件装完是 import 不到的；这份抄写不是权威，但能把"注册了一个会被注册表拒绝的工具"从用户会话里的运行时报错变成一条失败的测试
 - **装配** —— 用一个 stub context 真跑一遍 `apply()`：命令定义、工具定义、路由是否按各自的契约注册；`commands`/`tools` 服务缺失时仍然能加载；命令名撞车时只丢命令不丢插件；非 loopback 的写请求被拒
-- **端到端** —— 在一个临时项目上放一个假的 `openspec` 可执行文件，跑完整的 `/spec → 讨论 → 提交计划 → 确认 → 落盘` 全流程，以及 `RalphRunner` 按轮推进直到 `done`、预算耗尽变 `exhausted`、连续无进展变 `blocked`；提示词两种形态都走真实循环跑一遍：注册表里有 `ralph` 时会要求调用，没有时**一次都不提**，而那一轮照样把活干完；注册表问不动（抛错）时也只是退回「不问」这条路，不会把一轮弄挂
+- **端到端** —— 在一个临时项目上放一个假的 `openspec` 可执行文件，跑完整的 `/spec → 讨论 → 提交计划 → 确认 → 落盘` 全流程，以及 `RalphRunner` 按轮推进直到 `done`、预算耗尽变 `exhausted`、连续无进展变 `blocked`；提示词两种形态都走真实循环跑一遍：注册表里有 `ralph` 时会要求调用，没有时**一次都不提**，而那一轮照样把活干完；注册表问不动（抛错）时也只是退回「不问」这条路，不会把一轮弄挂；新建的会话会被登记进工作区分组，复用的会话会**再登记一次**（老会话因此自动归位），而目录没有工作区、登记抛错、`resolveByPath` 抛错这三种情况下那一轮照样跑完
 - **真 CLI 契约** —— 拿真的 `openspec`（1.9.0）在一个临时项目上跑 `init` / `new change` / `list` / `instructions apply` / `validate`，断言插件依赖的那几个输出字段和退出行为。装了 CLI 才跑，没装就整层跳过。其余测试要么替掉 CLI、要么放一个假的，这对测试**插件**是对的，但 CLI 是另一个程序：它改了而插件没跟上时，一个假的都不会红
 
 端到端那层用一个假的 session seam 替掉宿主，因为它要精确控制"这一轮对 `tasks.md` 做了什么"——而这是循环唯一被允许依赖的东西。假的 `openspec` 是**可执行脚本**而不是被替换的类：这段流程有意思的地方恰恰在于插件真的去 shell 了，换掉 `Openspec` 类就是在测试那个替身。

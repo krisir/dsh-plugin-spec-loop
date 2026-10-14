@@ -44,6 +44,7 @@ function harness({ onPrompt = () => {}, settings = {}, hasRalph = true } = {}) {
 	const listeners = new Map();
 	const agents = new Map();
 	const prompts = [];
+	const attached = [];
 
 	const session = {
 		id: SESSION_ID,
@@ -86,6 +87,21 @@ function harness({ onPrompt = () => {}, settings = {}, hasRalph = true } = {}) {
 		tools: {
 			get(name) {
 				return hasRalph && name === 'ralph' ? { name: 'ralph' } : undefined;
+			},
+		},
+		// A workspace owns its sessions through an explicit account, so putting a new
+		// session in one is a real call the seam has to make. `attachSession` here
+		// records it; tests can blank `workspaceRegistry.workspace` to model a
+		// directory nobody registered, or make the attach throw.
+		workspaceRegistry: {
+			workspace: {
+				title: 'project',
+				async attachSession(sessionId) {
+					attached.push(sessionId);
+				},
+			},
+			async resolveByPath() {
+				return this.workspace;
 			},
 		},
 		agents: {
@@ -134,11 +150,13 @@ function harness({ onPrompt = () => {}, settings = {}, hasRalph = true } = {}) {
 
 	return {
 		projectPath,
+		ctx,
 		store,
 		runner,
 		proposals,
 		sessions,
 		prompts,
+		attached,
 		settings,
 		/**
 		 * Wait until the runner has nothing in flight.
@@ -390,5 +408,81 @@ test('a round survives a tools registry that throws when asked', async () => {
 		assert.equal(h.store.find(h.projectPath, 'angry-tools').status, CHANGE_STATUS.done);
 	} finally {
 		h.cleanup();
+	}
+});
+
+test('the session the loop creates is put into the directory\'s workspace group', async () => {
+	const h = harness({
+		settings: { ralphIterations: 1, stallLimit: 5 },
+		onPrompt: ({ projectPath }) => completeTasks(projectPath, 'grouped', 1),
+	});
+	try {
+		await seedChange(h, 'grouped', 1);
+		h.store.mutate(() => h.store.ensure(h.projectPath, 'grouped', { maxIterations: 1 }));
+		h.runner.start(h.projectPath, 'grouped');
+		await h.settle();
+
+		// A workspace keeps an explicit account of its sessions; `create({cwd})` only
+		// sets a working directory, so without this the session shows up in no group —
+		// next to the user's own session in the very same directory.
+		assert.deepEqual(h.attached, [SESSION_ID]);
+		assert.equal(h.store.find(h.projectPath, 'grouped').sessionId, SESSION_ID);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test('a re-run re-groups an existing session instead of leaving it ungrouped', async () => {
+	const h = harness({
+		settings: { ralphIterations: 1, stallLimit: 5 },
+		onPrompt: ({ projectPath }) => completeTasks(projectPath, 'regroup', 1),
+	});
+	try {
+		await seedChange(h, 'regroup', 1);
+		h.store.mutate(() => h.store.ensure(h.projectPath, 'regroup', { maxIterations: 1 }));
+		h.runner.start(h.projectPath, 'regroup');
+		await h.settle();
+		assert.equal(h.attached.length, 1);
+
+		// Sessions created before grouping existed are still in no group. The next run
+		// is the only chance to fix that without asking the user to clean up by hand.
+		h.runner.start(h.projectPath, 'regroup');
+		await h.settle();
+		assert.deepEqual(h.attached, [SESSION_ID, SESSION_ID]);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test('a session that cannot be grouped still runs its round', async () => {
+	// Grouping is presentation. Neither a directory nobody registered nor a registry
+	// that refuses may turn into a failed change.
+	for (const sabotage of ['no-workspace', 'attach-throws', 'registry-throws']) {
+		const h = harness({
+			settings: { ralphIterations: 1, stallLimit: 5 },
+			onPrompt: ({ projectPath }) => completeTasks(projectPath, `odd-${sabotage}`, 1),
+		});
+		try {
+			if (sabotage === 'no-workspace') h.ctx.workspaceRegistry.workspace = undefined;
+			if (sabotage === 'attach-throws') {
+				h.ctx.workspaceRegistry.workspace.attachSession = async () => {
+					throw new Error('cwd resolves elsewhere');
+				};
+			}
+			if (sabotage === 'registry-throws') h.ctx.workspaceRegistry.resolveByPath = async () => {
+				throw new Error('realpath failed');
+			};
+
+			const id = `odd-${sabotage}`;
+			await seedChange(h, id, 1);
+			h.store.mutate(() => h.store.ensure(h.projectPath, id, { maxIterations: 1 }));
+			h.runner.start(h.projectPath, id);
+			await h.settle();
+
+			assert.equal(h.prompts.length, 1, `${sabotage}: the round still ran`);
+			assert.equal(h.store.find(h.projectPath, id).status, CHANGE_STATUS.done, sabotage);
+		} finally {
+			h.cleanup();
+		}
 	}
 });

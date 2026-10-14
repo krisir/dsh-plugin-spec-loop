@@ -152,7 +152,14 @@ export class SessionSeam {
 	async ensureSession({ sessionId, projectPath, agentPreset }) {
 		if (typeof sessionId === 'string' && sessionId.length > 0) {
 			const resolved = await this.#resolveAgent(sessionId);
-			if (resolved !== undefined) return sessionId;
+			if (resolved !== undefined) {
+				// A reused session is re-grouped too, not just a fresh one. Sessions made
+				// before this grouping existed are still sitting in no group, and the next
+				// round is the only chance to fix that without asking the user to clean up
+				// by hand. `attachSession` is idempotent once the id is accounted.
+				await this.#groupInWorkspace(sessionId, projectPath);
+				return sessionId;
+			}
 			// The recorded session is gone — deleted with its workspace, or from a
 			// profile that no longer has it. Falling through to a fresh one is better
 			// than failing the change forever.
@@ -161,7 +168,51 @@ export class SessionSeam {
 		const request = { cwd: projectPath };
 		if (typeof agentPreset === 'string' && agentPreset.length > 0) request.agentPreset = agentPreset;
 		const created = await this.ctx.sessionController.create(request);
+		await this.#groupInWorkspace(created.sessionId, projectPath);
 		return created.sessionId;
+	}
+
+	/**
+	 * Put a session into the sidebar group of the directory it works in.
+	 *
+	 * A workspace keeps its sessions in an explicit `sessionIds` account, and a
+	 * session created through `sessionController.create` is **not** added to one:
+	 * setting `cwd` gives the agent a directory to work in, not a place in the
+	 * sidebar. The registry does adopt stray sessions by matching cwd, but only
+	 * during its one-time history bootstrap at first use — so a session made
+	 * afterwards is never picked up and shows under no group at all, next to the
+	 * user's own session in the very same directory.
+	 *
+	 * `attachSession` is the documented way in, and it re-checks that the
+	 * session's stored cwd resolves to the workspace's own canonical path before
+	 * recording anything. `resolveByPath` canonicalizes through realpath, so the
+	 * comparison holds for the same `projectPath` the session was made with.
+	 *
+	 * Deliberately additive: a directory with no workspace is left alone rather
+	 * than given one. Registering a workspace is a visible edit to the user's
+	 * sidebar, and clicking 开始迭代 is not the moment to reorganize it.
+	 *
+	 * @param {string} sessionId - the session to group.
+	 * @param {string} projectPath - the directory it works in.
+	 * @returns {Promise<void>} resolves whether or not grouping was possible.
+	 */
+	async #groupInWorkspace(sessionId, projectPath) {
+		try {
+			const registry = this.ctx.get?.('workspaceRegistry') ?? this.ctx.workspaceRegistry;
+			if (registry === undefined || typeof registry.resolveByPath !== 'function') return;
+			const workspace = await registry.resolveByPath(projectPath);
+			if (workspace === undefined) {
+				this.log(`${projectPath} 还没有工作区，会话不会出现在侧边栏分组里`);
+				return;
+			}
+			if (typeof workspace.attachSession !== 'function') return;
+			await workspace.attachSession(sessionId);
+		} catch (error) {
+			// Grouping is presentation. An unwritable registry, a session whose stored
+			// cwd no longer resolves, a directory that vanished mid-run — none of them
+			// are reasons to refuse to iterate, so the round must not see this.
+			this.log(`会话 ${sessionId} 未能归入 ${projectPath} 的工作区：${String(error)}`);
+		}
 	}
 
 	/**

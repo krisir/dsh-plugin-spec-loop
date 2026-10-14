@@ -51,8 +51,12 @@ export const inject = ['sessionController', 'webServer', 'sessions', 'agents'];
  * the panel and the loop still work, so they are not injected as hard
  * requirements. A leaner composition loses the `/spec` entry point rather than
  * refusing to load at all.
+ *
+ * `workspaceRegistry` decides which sidebar group a session appears under. The
+ * loop is fully functional without it — the session still runs, in the right
+ * directory — so it must not be a hard dependency either.
  */
-const OPTIONAL_SERVICES = ['approval', 'commands', 'tools'];
+const OPTIONAL_SERVICES = ['approval', 'commands', 'tools', 'workspaceRegistry'];
 
 /**
  * The plugin's composition config, validated through Cordis' standard-schema seam.
