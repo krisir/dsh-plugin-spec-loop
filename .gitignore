@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.DS_Store
+
+# `client.js` is a build product, but the package ships it: a plugin that has to
+# be built before it can be installed is a plugin nobody installs. It is
+# committed, and `node build.mjs` is what keeps it honest.

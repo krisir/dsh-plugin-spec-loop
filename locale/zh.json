@@ -1,0 +1,4 @@
+{
+  "meta.title": "Spec Loop",
+  "meta.description": "拆分需求为 OpenSpec change，并用 ralph 迭代逐个实现。"
+}

@@ -1,0 +1,20 @@
+# Bundle patch for dsh-plugin-spec-loop.
+#
+# Inserting the row is all that is needed: the package's own `apply` registers
+# the control routes and the browser half is discovered through `dsh.client` in
+# package.json.
+#
+# The values below are a *seed*: they are written into the durable document the
+# first time it is created, so the settings the page edits survive a restart.
+# Uncommenting a different seed later will not undo what the user has chosen.
+- insert:
+    - id: spec-loop
+      name: 'dsh-plugin-spec-loop'
+      # config:
+      #   ralphIterations: 3          # default ralph rounds per change
+      #   concurrency: 1              # how many changes iterate at once
+      #   iterationTimeoutMinutes: 45 # one ralph round may not run longer
+      #   stallLimit: 2               # no-progress rounds before a change is blocked
+      #   autoApprove: true           # plugin-driven sessions skip authorizations
+      #   openspecCommand: openspec   # an absolute path is accepted too
+      #   file: ''                    # empty = <DSH_HOME>/spec-loop/state.json

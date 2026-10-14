@@ -1,0 +1,71 @@
+{
+  "name": "dsh-plugin-spec-loop",
+  "version": "0.1.0",
+  "description": "Turn one requirement into a set of OpenSpec changes, then drive each change through a configurable ralph iteration loop — with a running list you can watch.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "openspec",
+    "ralph",
+    "spec-driven-development"
+  ],
+  "main": "./index.js",
+  "exports": {
+    ".": {
+      "default": "./index.js"
+    },
+    "./client": {
+      "default": "./client.js"
+    },
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "install.mjs",
+    "build.mjs",
+    "icon.svg",
+    "host/",
+    "src/",
+    "locale/"
+  ],
+  "scripts": {
+    "build": "node build.mjs",
+    "install-plugin": "node install.mjs install",
+    "uninstall-plugin": "node install.mjs uninstall",
+    "status": "node install.mjs status",
+    "test": "node build.mjs && node --test test/"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "meta": {
+    "title": "Spec Loop",
+    "description": "拆分需求为 OpenSpec change，并用 ralph 迭代逐个实现。"
+  },
+  "icon": "./icon.svg",
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-layout"
+      ]
+    }
+  },
+  "devDependencies": {
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0"
+  }
+}
