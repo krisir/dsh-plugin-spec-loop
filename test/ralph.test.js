@@ -41,19 +41,37 @@ test('the objective tolerates an empty task list', () => {
 	assert.match(objective, /已经没有未完成任务/);
 });
 
-test('the round prompt asks for the ralph tool, passes the objective verbatim and caps rounds at one', () => {
+test('a round whose agent has ralph asks for it, passes the objective verbatim and caps rounds at one', () => {
 	const objective = renderObjective({ record: RECORD, changeDir: CHANGE_DIR, info: INFO });
-	const prompt = renderRoundPrompt({ record: RECORD, objective, round: 2, maxRounds: 5 });
+	const prompt = renderRoundPrompt({ record: RECORD, objective, round: 2, maxRounds: 5, hasRalph: true });
 	assert.match(prompt, /第 2\/5 轮/);
 	assert.match(prompt, /调用 `ralph` 工具/);
 	assert.match(prompt, /逐字/);
 	assert.match(prompt, new RegExp(`maxRounds: ${ROUNDS_PER_INVOCATION}`));
 	assert.equal(ROUNDS_PER_INVOCATION, 1, 'one round per invocation is what makes the page count honest');
 	assert.ok(prompt.includes(objective), 'the objective is embedded whole');
+	// A visible tool can still fail to start, so the fallback clause stays.
+	assert.match(prompt, /如果调用 `ralph` 失败/);
 });
 
-test('the round prompt degrades gracefully when the ralph tool is absent', () => {
-	const prompt = renderRoundPrompt({ record: RECORD, objective: 'x', round: 1, maxRounds: 1 });
-	assert.match(prompt, /如果 `ralph` 工具不存在或调用失败/);
-	assert.match(prompt, /自己/);
+test('a round whose agent has no ralph is never told to call it', () => {
+	const prompt = renderRoundPrompt({ record: RECORD, objective: 'x', round: 1, maxRounds: 1, hasRalph: false });
+	// This is the whole point of asking the registry: the model should not have to
+	// discover the absence and announce it, which is what filled every round's
+	// opening line with "ralph 不可用" and made a working loop look broken.
+	assert.doesNotMatch(prompt, /调用 `ralph` 工具/);
+	assert.doesNotMatch(prompt, /如果调用 `ralph` 失败/);
+	assert.match(prompt, /没有装配 `ralph` 工具/);
+	assert.match(prompt, /你本人/);
+	// The wording may name the tool; it must never instruct a call to it.
+	assert.doesNotMatch(prompt, /maxRounds:/);
+});
+
+test('both round shapes insist on the tasks.md tick, which is the only progress signal', () => {
+	for (const hasRalph of [true, false]) {
+		const prompt = renderRoundPrompt({ record: RECORD, objective: 'x', round: 1, maxRounds: 1, hasRalph });
+		assert.match(prompt, /tasks\.md/, `hasRalph=${hasRalph}`);
+		assert.match(prompt, /- \[x\]/, `hasRalph=${hasRalph}`);
+		assert.match(prompt, /不勾就等于这一轮白跑/, `hasRalph=${hasRalph}`);
+	}
 });

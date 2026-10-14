@@ -80,12 +80,22 @@
 
 ### 关于 `ralph` 工具
 
-`@deepseek-ai/dsh-tool-ralph` 在 DSH 里是**默认关闭的 opt-in 行**：`dsh-web-app` 的 `minimal` / `ptc` / `standard` 三个 agent preset 里都写着 `disabled: true`。所以插件每一轮的提示词是**双路径**的：
+`@deepseek-ai/dsh-tool-ralph` 在 DSH 里是**默认关闭的 opt-in 行**：`dsh-web-app` 的 `minimal` / `ptc` / `standard` 三个 agent preset 里都写着 `disabled: true`。
 
-1. 先要求会话调用 `ralph` 工具，并把 objective 逐字传入；
-2. 如果这个 profile 没有启用 `ralph`，会话就自己按 objective 把这一轮做完。
+所以插件**在每一轮开始前先问一遍注册表**，再决定提示词怎么写：
 
-两条路都成立，并且判定标准完全一样（`tasks.md` 的勾选数）。
+```
+ctx.tools.get('ralph', agent)   // 传 agent 作为查看范围
+```
+
+传 agent 是关键：工具是**按 agent preset 组合**的，全局注册的工具还可能被某个 scope 的 `restrict()` 掩掉——注册表文档里原话是「被限制掉的全集工具读起来就像不存在」。只看全局视图会得到一个对模型不成立的答案。因此：
+
+- **拿得到 `ralph`** → 要求会话调用它，并把 objective 逐字传入（保留"调用失败就自己做"的兜底：工具可见不等于一定起得来）。
+- **拿不到** → 提示词直接写"这一轮由你本人完成"，**完全不提** `ralph`。
+
+第二种情况以前不是这样的：那时提示词一律要求调用 `ralph`，于是每一轮都先花一步发现它不存在，然后在回复里宣布一句「`ralph` 仍不可用」。功能其实一直在正常工作（会话会自己把这一轮做完），但这句话让一个正常的循环看起来像坏的。现在这一句不会再出现了。
+
+两条路的判定标准完全一样（`tasks.md` 的勾选数），而且两种提示词**都会在结尾强调必须勾选** —— 这是循环唯一的进展信号，不勾就等于这一轮白跑。
 
 **想真正启用它不是改一行开关那么简单**，下面是把尝试过的三条路都记下来，免得再翻一遍：
 
@@ -116,7 +126,7 @@ node install.mjs uninstall --profile desktop
 
 ```bash
 node build.mjs      # src/*.js → client.js
-node --test test/   # 131 个测试
+node --test test/   # 133 个测试
 ```
 
 浏览器那一半的源码按文件名顺序拼接成一个 factory，所以**文件之间不能有相对 `require`**，只能用 `react`。`build.mjs` 会检查这一点。
@@ -221,7 +231,7 @@ pnpm install --dev
 node --test test/
 ```
 
-131 个测试：
+133 个测试：
 
 - **纯函数** —— `parseSpecCommand` / `normalizeProposal` / `renderTaskMarkdown` / `lintEntry` / `toKebab` / `renderObjective` / `normalizeSettings` / `parseTaskText` 等
 - **持久化** —— 原子写、损坏文件改名保留、未知状态归一化、讨论状态按 session 存取与淘汰
@@ -229,7 +239,7 @@ node --test test/
 - **渲染** —— 用真实的 React 渲染真实的组件，断言每个状态、每种按钮文案、进度条的 `aria-valuenow`、日志顺序、讨论面板与待确认计划的每种形态，超长错误/摘要不会撑爆卡片，以及会话 chip 的两种形态（能跳时 `▶` + tooltip 说「打开会话」，不能跳时 `◈` + tooltip 说「复制会话 id」）和「还没跑过就没有 chip」
 - **注册契约** —— 把 `commands.register()` / `tools.register()` 的准入规则照抄进测试（schema 子集、命令名字法、handler 返回值形状），断言插件真的交得出合格的定义。服务本身在 app 的模块图里，插件装完是 import 不到的；这份抄写不是权威，但能把"注册了一个会被注册表拒绝的工具"从用户会话里的运行时报错变成一条失败的测试
 - **装配** —— 用一个 stub context 真跑一遍 `apply()`：命令定义、工具定义、路由是否按各自的契约注册；`commands`/`tools` 服务缺失时仍然能加载；命令名撞车时只丢命令不丢插件；非 loopback 的写请求被拒
-- **端到端** —— 在一个临时项目上放一个假的 `openspec` 可执行文件，跑完整的 `/spec → 讨论 → 提交计划 → 确认 → 落盘` 全流程，以及 `RalphRunner` 按轮推进直到 `done`、预算耗尽变 `exhausted`、连续无进展变 `blocked`
+- **端到端** —— 在一个临时项目上放一个假的 `openspec` 可执行文件，跑完整的 `/spec → 讨论 → 提交计划 → 确认 → 落盘` 全流程，以及 `RalphRunner` 按轮推进直到 `done`、预算耗尽变 `exhausted`、连续无进展变 `blocked`；提示词两种形态都走真实循环跑一遍：注册表里有 `ralph` 时会要求调用，没有时**一次都不提**，而那一轮照样把活干完
 - **真 CLI 契约** —— 拿真的 `openspec`（1.9.0）在一个临时项目上跑 `init` / `new change` / `list` / `instructions apply` / `validate`，断言插件依赖的那几个输出字段和退出行为。装了 CLI 才跑，没装就整层跳过。其余测试要么替掉 CLI、要么放一个假的，这对测试**插件**是对的，但 CLI 是另一个程序：它改了而插件没跟上时，一个假的都不会红
 
 端到端那层用一个假的 session seam 替掉宿主，因为它要精确控制"这一轮对 `tasks.md` 做了什么"——而这是循环唯一被允许依赖的东西。假的 `openspec` 是**可执行脚本**而不是被替换的类：这段流程有意思的地方恰恰在于插件真的去 shell 了，换掉 `Openspec` 类就是在测试那个替身。

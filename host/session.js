@@ -178,6 +178,36 @@ export class SessionSeam {
 	}
 
 	/**
+	 * Whether a tool is actually visible to a session's agent right now.
+	 *
+	 * Asked of the registry rather than assumed from the profile, because
+	 * "which tools exist" is composed per agent preset and can be narrowed
+	 * again by a scope's restrictions: a tool can be registered globally and
+	 * still read as absent for the agent that will run the round. Passing the
+	 * agent as the viewing scope is the documented way to get that answer, and
+	 * the only way to know what the model will actually be able to call.
+	 *
+	 * @param {string} name - the tool name as registered.
+	 * @param {string} sessionId - the session whose agent's view is wanted.
+	 * @returns {Promise<boolean>} true when that agent could call the tool.
+	 */
+	async hasTool(name, sessionId) {
+		const tools = this.ctx.get?.('tools') ?? this.ctx.tools;
+		if (tools === undefined || typeof tools.get !== 'function') return false;
+		const agent = await this.#resolveAgent(sessionId);
+		if (agent === undefined) return false;
+		try {
+			return tools.get(name, agent) !== undefined;
+		} catch (error) {
+			// A registry that refuses the question must not fail a round: reporting
+			// "no such tool" only costs a step, which is what happened before this
+			// check existed at all.
+			this.log(`无法确认工具 ${name} 是否可用：${String(error)}`);
+			return false;
+		}
+	}
+
+	/**
 	 * Send one prompt and resolve once its turn has ended.
 	 *
 	 * @param {object} options - the round.

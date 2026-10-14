@@ -97,44 +97,76 @@ export function renderObjective({ record, changeDir, info }) {
 }
 
 /**
- * The prompt that makes a session call the `ralph` tool.
+ * The prompt that opens one round.
  *
- * The objective is fenced and labelled so the model can pass it through
- * verbatim. The fallback clause matters: `ralph` is a shipped tool that a
- * leaner profile may not compose, and a round that refuses to run at all would
- * turn "this profile has no ralph" into "this change is stuck" — two very
- * different problems that should not look alike on the page.
+ * Two shapes, because `ralph` is a shipped tool that a leaner agent preset does
+ * not compose — and a prompt that tells the model to call a tool it does not
+ * have spends a step discovering that and then announces the absence in its
+ * reply, which reads as "the plugin is broken" on every single round. So the
+ * caller asks the registry what the round's agent can actually call and picks
+ * the wording to match.
+ *
+ * The delegated shape keeps a fallback clause anyway: a tool can be visible and
+ * still fail to start, and a round that refused to run at all would turn "this
+ * one call failed" into "this change is stuck".
  *
  * @param {object} options - prompt inputs.
  * @param {object} options.record - the change record.
  * @param {string} options.objective - the objective text.
  * @param {number} options.round - the round number, 1-based.
  * @param {number} options.maxRounds - the round budget.
+ * @param {boolean} options.hasRalph - whether the round's agent can call `ralph`.
  * @returns {string} the prompt.
  */
-export function renderRoundPrompt({ record, objective, round, maxRounds }) {
-	return [
+export function renderRoundPrompt({ record, objective, round, maxRounds, hasRalph }) {
+	const lines = [
 		`【Spec Loop · ralph 第 ${round}/${maxRounds} 轮 · change ${record.id}】`,
 		'',
-		'这一轮请**调用 `ralph` 工具**来执行，参数如下：',
+		hasRalph === true
+			? '这一轮请**调用 `ralph` 工具**来执行，参数如下：'
+			: '这一轮请**你本人**按下面这份 objective 来做：',
 		'',
 		'objective:',
 		'```text',
 		objective,
 		'```',
-		'',
-		`maxRounds: ${ROUNDS_PER_INVOCATION}`,
-		'',
-		'说明：',
-		'',
-		'- `ralph` 会为这一轮启动一个全新的子 agent，它只看得到上面这份 objective 和共享工作区。',
-		'  所以请把 objective **逐字**传给 `ralph`，不要改写、不要补充。',
-		'- 一轮只做一轮：`maxRounds` 传 1。轮与轮之间的推进由插件根据 `tasks.md` 自己判断。',
-		'- 如果 `ralph` 工具不存在或调用失败，就**自己**按 objective 里的要求把这一轮做完：',
-		'  读 change 目录、实现任务、把 `tasks.md` 里完成的条目改成 `- [x]`，然后汇报。',
-		'',
-		'本轮结束时用中文简短汇报：完成了哪几条、怎么验证的、还剩什么、有没有被阻塞。',
-	].join('\n');
+	];
+
+	if (hasRalph === true) {
+		lines.push(
+			'',
+			`maxRounds: ${ROUNDS_PER_INVOCATION}`,
+			'',
+			'说明：',
+			'',
+			'- `ralph` 会为这一轮启动一个全新的子 agent，它只看得到上面这份 objective 和共享工作区。',
+			'  所以请把 objective **逐字**传给 `ralph`，不要改写、不要补充。',
+			'- 一轮只做一轮：`maxRounds` 传 1。轮与轮之间的推进由插件根据 `tasks.md` 自己判断。',
+			'- 如果调用 `ralph` 失败，就**自己**按上面这份 objective 把这一轮做完。',
+		);
+	} else {
+		lines.push(
+			'',
+			'说明：',
+			'',
+			'- 这个 profile 没有装配 `ralph` 工具，所以这一轮由你会话自己完成，不必去找它。',
+			'- 一轮只做一轮。轮与轮之间的推进由插件根据 `tasks.md` 自己判断。',
+		);
+	}
+
+	return lines
+		.concat([
+			'',
+			// Repeated outside the objective because it is the loop's only progress
+			// signal: a round that does the work but leaves the boxes unticked reads
+			// as zero progress, the change never converges, and the page blames the
+			// change instead of the missing tick.
+			`收尾前务必把 \`${record.id}\` 的 \`tasks.md\` 里**确实做完并验证过**的条目改成 \`- [x]\` ——`,
+			'插件只按这个勾选数判断进展，不勾就等于这一轮白跑。',
+			'',
+			'本轮结束时用中文简短汇报：完成了哪几条、怎么验证的、还剩什么、有没有被阻塞。',
+		])
+		.join('\n');
 }
 
 /** Truncate a note into something the page can show. */
@@ -405,6 +437,10 @@ export class RalphRunner {
 				this.log(`change ${id} 第 ${round}/${record.maxIterations} 轮开始（${progress.complete}/${progress.total}）`);
 
 				const startedAt = Date.now();
+				// Asked once per round, not once per run: a profile can recompose an
+				// agent's preset between rounds, and an answer cached at the top of the
+				// loop would then describe a toolset that no longer exists.
+				const hasRalph = await this.sessions.hasTool('ralph', sessionId);
 				let turn;
 				try {
 					turn = await this.sessions.runTurn({
@@ -414,6 +450,7 @@ export class RalphRunner {
 							objective: renderObjective({ record, changeDir, info }),
 							round,
 							maxRounds: record.maxIterations,
+							hasRalph,
 						}),
 						requestId: `spec-loop-${id}-${round}-${startedAt}`,
 						timeoutMs,

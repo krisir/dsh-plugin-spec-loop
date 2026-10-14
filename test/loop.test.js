@@ -29,9 +29,10 @@ const SESSION_ID = 'loop-session';
  * @param {object} [options] - harness options.
  * @param {(context: object) => void | Promise<void>} [options.onPrompt] - what a round does.
  * @param {object} [options.settings] - seed settings.
+ * @param {boolean} [options.hasRalph] - whether the agent's toolset contains `ralph`.
  * @returns {object} the harness.
  */
-function harness({ onPrompt = () => {}, settings = {} } = {}) {
+function harness({ onPrompt = () => {}, settings = {}, hasRalph = true } = {}) {
 	const projectPath = mkdtempSync(join(tmpdir(), 'spec-loop-proj-'));
 	const stateDir = mkdtempSync(join(tmpdir(), 'spec-loop-state-'));
 	const file = join(stateDir, 'state.json');
@@ -76,6 +77,15 @@ function harness({ onPrompt = () => {}, settings = {} } = {}) {
 		sessions: {
 			get(id) {
 				return id === 'user-session' ? { header: { cwd: projectPath } } : undefined;
+			},
+		},
+		// The real registry resolves per viewing scope: a tool registered globally can
+		// still read as absent for one agent's preset. The seam passes the agent, so
+		// this stub answers by name and ignores the scope, which is enough to drive
+		// both round shapes through the genuine `SessionSeam.hasTool` path.
+		tools: {
+			get(name) {
+				return hasRalph && name === 'ralph' ? { name: 'ralph' } : undefined;
 			},
 		},
 		agents: {
@@ -266,6 +276,7 @@ test('each round asks the session for one ralph round carrying the pending tasks
 	const h = harness({
 		settings: { ralphIterations: 3, stallLimit: 5 },
 		onPrompt: () => {},
+		hasRalph: true,
 	});
 	try {
 		await seedChange(h, 'prompted', 2);
@@ -280,6 +291,31 @@ test('each round asks the session for one ralph round carrying the pending tasks
 		assert.match(prompt, /maxRounds: 1/);
 		assert.match(prompt, /- \[ \] 1\.1 任务 1/);
 		assert.match(prompt, /- \[ \] 1\.2 任务 2/);
+	} finally {
+		h.cleanup();
+	}
+});
+
+test('a round on an agent without ralph never asks for it', async () => {
+	const h = harness({
+		settings: { ralphIterations: 1, stallLimit: 5 },
+		onPrompt: ({ projectPath }) => completeTasks(projectPath, 'no-ralph', 1),
+		hasRalph: false,
+	});
+	try {
+		await seedChange(h, 'no-ralph', 1);
+		h.store.mutate(() => h.store.ensure(h.projectPath, 'no-ralph', { maxIterations: 1 }));
+		h.runner.start(h.projectPath, 'no-ralph');
+		await h.settle();
+
+		const [prompt] = h.prompts;
+		assert.doesNotMatch(prompt, /调用 `ralph` 工具/);
+		assert.match(prompt, /没有装配 `ralph` 工具/);
+		// The round still has to carry the whole job, or suppressing the ralph
+		// instruction would have turned one confusing message into a lost round.
+		assert.match(prompt, /- \[ \] 1\.1 任务 1/);
+		assert.match(prompt, /- \[x\]/);
+		assert.equal(h.store.find(h.projectPath, 'no-ralph').status, CHANGE_STATUS.done);
 	} finally {
 		h.cleanup();
 	}
