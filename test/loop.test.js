@@ -365,3 +365,30 @@ test('stopping a queued change marks it cancelled without a round', async () => 
 		h.cleanup();
 	}
 });
+
+test('a round survives a tools registry that throws when asked', async () => {
+	// The probe must never be the reason a change fails: answering "no ralph"
+	// costs nothing, while an escaping throw would fail the round outright.
+	const h = harness({
+		settings: { ralphIterations: 1, stallLimit: 5 },
+		onPrompt: ({ projectPath }) => completeTasks(projectPath, 'angry-tools', 1),
+		hasRalph: false,
+	});
+	try {
+		h.sessions.ctx.tools = {
+			get() {
+				throw new Error('registry unavailable');
+			},
+		};
+		await seedChange(h, 'angry-tools', 1);
+		h.store.mutate(() => h.store.ensure(h.projectPath, 'angry-tools', { maxIterations: 1 }));
+		h.runner.start(h.projectPath, 'angry-tools');
+		await h.settle();
+
+		assert.equal(h.prompts.length, 1, 'the round still ran');
+		assert.doesNotMatch(h.prompts[0], /调用 `ralph` 工具/);
+		assert.equal(h.store.find(h.projectPath, 'angry-tools').status, CHANGE_STATUS.done);
+	} finally {
+		h.cleanup();
+	}
+});

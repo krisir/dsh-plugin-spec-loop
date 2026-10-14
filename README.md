@@ -126,7 +126,7 @@ node install.mjs uninstall --profile desktop
 
 ```bash
 node build.mjs      # src/*.js → client.js
-node --test test/   # 133 个测试
+node --test test/   # 134 个测试
 ```
 
 浏览器那一半的源码按文件名顺序拼接成一个 factory，所以**文件之间不能有相对 `require`**，只能用 `react`。`build.mjs` 会检查这一点。
@@ -231,7 +231,7 @@ pnpm install --dev
 node --test test/
 ```
 
-133 个测试：
+134 个测试：
 
 - **纯函数** —— `parseSpecCommand` / `normalizeProposal` / `renderTaskMarkdown` / `lintEntry` / `toKebab` / `renderObjective` / `normalizeSettings` / `parseTaskText` 等
 - **持久化** —— 原子写、损坏文件改名保留、未知状态归一化、讨论状态按 session 存取与淘汰
@@ -239,7 +239,7 @@ node --test test/
 - **渲染** —— 用真实的 React 渲染真实的组件，断言每个状态、每种按钮文案、进度条的 `aria-valuenow`、日志顺序、讨论面板与待确认计划的每种形态，超长错误/摘要不会撑爆卡片，以及会话 chip 的两种形态（能跳时 `▶` + tooltip 说「打开会话」，不能跳时 `◈` + tooltip 说「复制会话 id」）和「还没跑过就没有 chip」
 - **注册契约** —— 把 `commands.register()` / `tools.register()` 的准入规则照抄进测试（schema 子集、命令名字法、handler 返回值形状），断言插件真的交得出合格的定义。服务本身在 app 的模块图里，插件装完是 import 不到的；这份抄写不是权威，但能把"注册了一个会被注册表拒绝的工具"从用户会话里的运行时报错变成一条失败的测试
 - **装配** —— 用一个 stub context 真跑一遍 `apply()`：命令定义、工具定义、路由是否按各自的契约注册；`commands`/`tools` 服务缺失时仍然能加载；命令名撞车时只丢命令不丢插件；非 loopback 的写请求被拒
-- **端到端** —— 在一个临时项目上放一个假的 `openspec` 可执行文件，跑完整的 `/spec → 讨论 → 提交计划 → 确认 → 落盘` 全流程，以及 `RalphRunner` 按轮推进直到 `done`、预算耗尽变 `exhausted`、连续无进展变 `blocked`；提示词两种形态都走真实循环跑一遍：注册表里有 `ralph` 时会要求调用，没有时**一次都不提**，而那一轮照样把活干完
+- **端到端** —— 在一个临时项目上放一个假的 `openspec` 可执行文件，跑完整的 `/spec → 讨论 → 提交计划 → 确认 → 落盘` 全流程，以及 `RalphRunner` 按轮推进直到 `done`、预算耗尽变 `exhausted`、连续无进展变 `blocked`；提示词两种形态都走真实循环跑一遍：注册表里有 `ralph` 时会要求调用，没有时**一次都不提**，而那一轮照样把活干完；注册表问不动（抛错）时也只是退回「不问」这条路，不会把一轮弄挂
 - **真 CLI 契约** —— 拿真的 `openspec`（1.9.0）在一个临时项目上跑 `init` / `new change` / `list` / `instructions apply` / `validate`，断言插件依赖的那几个输出字段和退出行为。装了 CLI 才跑，没装就整层跳过。其余测试要么替掉 CLI、要么放一个假的，这对测试**插件**是对的，但 CLI 是另一个程序：它改了而插件没跟上时，一个假的都不会红
 
 端到端那层用一个假的 session seam 替掉宿主，因为它要精确控制"这一轮对 `tasks.md` 做了什么"——而这是循环唯一被允许依赖的东西。假的 `openspec` 是**可执行脚本**而不是被替换的类：这段流程有意思的地方恰恰在于插件真的去 shell 了，换掉 `Openspec` 类就是在测试那个替身。

@@ -192,16 +192,17 @@ export class SessionSeam {
 	 * @returns {Promise<boolean>} true when that agent could call the tool.
 	 */
 	async hasTool(name, sessionId) {
-		const tools = this.ctx.get?.('tools') ?? this.ctx.tools;
-		if (tools === undefined || typeof tools.get !== 'function') return false;
 		const agent = await this.#resolveAgent(sessionId);
 		if (agent === undefined) return false;
 		try {
+			const tools = this.ctx.get?.('tools') ?? this.ctx.tools;
+			if (tools === undefined || typeof tools.get !== 'function') return false;
 			return tools.get(name, agent) !== undefined;
 		} catch (error) {
-			// A registry that refuses the question must not fail a round: reporting
-			// "no such tool" only costs a step, which is what happened before this
-			// check existed at all.
+			// Answering "no" is the safe direction: a round that does its own work is
+			// correct whatever the toolset was, while a round told to call a tool that
+			// may not exist spends a step finding out. Neither may fail the change, so
+			// nothing in here is allowed to escape.
 			this.log(`无法确认工具 ${name} 是否可用：${String(error)}`);
 			return false;
 		}
