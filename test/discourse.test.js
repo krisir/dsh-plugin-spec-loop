@@ -15,8 +15,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const GROUPS = [{ group: 'A', items: ['一', '二'] }];
-
 /** A store in a scratch directory that is removed afterwards. */
 function scratchStore(t) {
 	const dir = mkdtempSync(join(tmpdir(), 'spec-loop-discourse-'));
@@ -100,8 +98,8 @@ test('status text explains the next step in each state', () => {
 			requirement: '加多租户',
 			proposal: {
 				entries: [
-					newProposalEntry({ id: 'a', title: 'A', summary: '', proposal: '', design: '', tasks: '', specs: [] }),
-					{ ...newProposalEntry({ id: 'b', title: 'B', summary: '', proposal: '', design: '', tasks: '', specs: [] }), include: false },
+					newProposalEntry({ id: 'a', title: 'A', summary: '' }),
+					{ ...newProposalEntry({ id: 'b', title: 'B', summary: '' }), include: false },
 				],
 			},
 		},
@@ -139,7 +137,7 @@ test('the propose tool stores a plan without creating anything', (t) => {
 	});
 	const tool = createProposeTool({ store, projectOfSession: () => '/repo' });
 	const value = tool.execute(
-		{ changes: [{ id: 'multi-tenant', title: '多租户', summary: '做隔离', tasks: GROUPS }] },
+		{ changes: [{ id: 'multi-tenant', title: '多租户', summary: '做隔离' }] },
 		{ agent: { session: { id: 'session-1' } } },
 	);
 	assert.equal(value.status, 'accepted');
@@ -154,7 +152,7 @@ test('the propose tool stores a plan without creating anything', (t) => {
 test('the propose tool refuses a call with no discussion behind it', (t) => {
 	const store = scratchStore(t);
 	const tool = createProposeTool({ store, projectOfSession: () => '/repo' });
-	const value = tool.execute({ changes: [{ id: 'x', title: 'X', tasks: GROUPS }] }, { agent: { session: { id: 'session-9' } } });
+	const value = tool.execute({ changes: [{ id: 'x', title: 'X' }] }, { agent: { session: { id: 'session-9' } } });
 	assert.equal(value.status, 'refused');
 	assert.match(value.message, /\/spec <需求>/);
 	assert.equal(store.draft('session-9'), undefined);
@@ -172,9 +170,13 @@ test('the propose tool reports what it dropped instead of failing silently', (t)
 		dropped: [],
 	});
 	const tool = createProposeTool({ store, projectOfSession: () => '/repo' });
-	const value = tool.execute({ changes: [{ id: 'no-tasks', title: 'Nothing', tasks: [] }] }, { agent: { session: { id: 'session-2' } } });
+	// An entry with no title is one the creator could not name, so it is dropped
+	// rather than saved as a change the user would see as a bare id.
+	const value = tool.execute({ changes: [{ id: 'no-title', title: '   ' }] }, { agent: { session: { id: 'session-2' } } });
 	assert.equal(value.status, 'rejected');
 	assert.match(value.message, /没有被保存/);
+	assert.match(value.message, /标题/);
+	assert.equal(value.dropped, 1);
 	assert.equal(store.draft('session-2').status, DRAFT_STATUS.discussing);
 });
 
@@ -191,13 +193,13 @@ test('the propose tool replaces an earlier plan, which is how a revision works',
 	});
 	const tool = createProposeTool({ store, projectOfSession: () => '/repo' });
 	const exec = { agent: { session: { id: 'session-3' } } };
-	tool.execute({ changes: [{ id: 'first', title: 'First', tasks: GROUPS }] }, exec);
-	tool.execute({ changes: [{ id: 'second', title: 'Second', tasks: GROUPS }] }, exec);
+	tool.execute({ changes: [{ id: 'first', title: 'First' }] }, exec);
+	tool.execute({ changes: [{ id: 'second', title: 'Second' }] }, exec);
 	const entries = store.draft('session-3').proposal.entries;
 	assert.deepEqual(entries.map((entry) => entry.id), ['second']);
 });
 
-test('the propose tool surfaces lint problems before the user confirms', (t) => {
+test('the propose tool stores a plan and defers creation to the skill', (t) => {
 	const store = scratchStore(t);
 	store.saveDraft({
 		sessionId: 'session-4',
@@ -215,16 +217,22 @@ test('the propose tool surfaces lint problems before the user confirms', (t) => 
 				{
 					id: 'themed',
 					title: 'T',
-					tasks: GROUPS,
-					specs: [{ capability: 'ui/theming', content: '### Requirement: 没有场景\n只有一句话。\n' }],
+					summary: '做主题',
+					// An agent still sending the old artifact fields is not an error —
+					// they are simply not part of a plan and must not be stored.
+					tasks: [{ group: 'A', items: ['一'] }],
+					specs: [{ capability: 'ui/theming', content: '### Requirement: 没有场景\n' }],
 				},
 			],
 		},
 		{ agent: { session: { id: 'session-4' } } },
 	);
 	assert.equal(value.status, 'accepted');
-	assert.equal(value.problems.length, 1);
-	assert.match(value.message, /可能/);
+	assert.deepEqual(Object.keys(store.draft('session-4').proposal.entries[0]).sort(), ['id', 'include', 'summary', 'title']);
+	// The tool must tell the agent, in the response it reads, to stop and wait.
+	assert.match(value.message, /不要创建任何目录或文件/);
+	assert.match(value.message, /openspec-propose/);
+	assert.match(value.message, /等用户/);
 });
 
 test('the propose tool refuses when the session cannot be resolved', (t) => {

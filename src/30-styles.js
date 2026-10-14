@@ -213,27 +213,6 @@ const STYLESHEET = `
 .sl-proposal-id { font-size: 11.5px; color: var(--dsw-alias-label-secondary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .sl-check { width: 15px; height: 15px; accent-color: var(--dsw-alias-brand-primary); flex: none; cursor: pointer; }
 
-.sl-tasks { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
-.sl-tasks code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; margin-right: 4px; color: var(--dsw-alias-label-primary); }
-
-.sl-artifacts { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--dsw-alias-border-l1); padding-top: 9px; }
-.sl-artifacts section { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.sl-pre {
-	margin: 0;
-	padding: 9px;
-	max-height: 320px;
-	overflow: auto;
-	border-radius: 7px;
-	background: var(--dsw-alias-bg-layer-2);
-	border: 1px solid var(--dsw-alias-border-l1);
-	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	font-size: 11.5px;
-	line-height: 1.5;
-	white-space: pre-wrap;
-	word-break: break-word;
-	color: var(--dsw-alias-label-primary);
-}
-
 @media (prefers-reduced-motion: reduce) {
 	.sl-bar-fill { transition: none; }
 	.sl-spinner { animation-duration: 2s; }

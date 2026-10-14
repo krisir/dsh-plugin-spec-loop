@@ -21,7 +21,7 @@ import {
 	renderStatus,
 } from './discourse.js';
 import { Openspec, changeIdsOnDisk } from './openspec.js';
-import { ProposalError } from './proposal.js';
+import { CREATE_SKILL, ProposalError } from './proposal.js';
 import { DRAFT_STATUS, newDraft } from './state.js';
 
 /** One command result the adapter renders outside model history. */
@@ -144,7 +144,7 @@ export function createSpecCommand({ store, proposals, sessions, projectOfSession
 		store.clearDraft(sessionId);
 		log(`applied ${outcome.ids.length} change(s) for ${sessionId}`);
 		const lines = [
-			`已创建 ${outcome.ids.length} 个 change：`,
+			`已由 \`${CREATE_SKILL}\` 技能创建 ${outcome.ids.length} 个 change：`,
 			...outcome.ids.map((id) => `  - ${id}`),
 			'',
 			'接下来在页面上给它们设置轮数并开始迭代，或者用 `/spec list` 看进度。',

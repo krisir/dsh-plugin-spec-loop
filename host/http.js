@@ -37,7 +37,7 @@ const MUTATIONS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 const MAX_BODY = 256 * 1024;
 
 /** The routes that are read with GET. */
-const READ_ROUTES = new Set(['/state', '/', '/draft/entry']);
+const READ_ROUTES = new Set(['/state', '/']);
 
 /** Every path that answers a POST. */
 const WRITE_ROUTES = new Set([
@@ -162,18 +162,6 @@ export function createHandler({ store, proposals, sessions, runner, projectOfSes
 	/** The draft a request names, or undefined. */
 	const draftFor = (sessionId) => store.draft(typeof sessionId === 'string' ? sessionId : '');
 
-	/**
-	 * The proposal entry a request names, or undefined.
-	 * @param {string} sessionId - the session.
-	 * @param {unknown} id - the entry id.
-	 * @returns {object | undefined} the stored entry.
-	 */
-	const entryFor = (sessionId, id) => {
-		const draft = draftFor(sessionId);
-		if (typeof id !== 'string') return undefined;
-		return draft?.proposal?.entries.find((entry) => entry.id === id);
-	};
-
 	/** The full snapshot the page renders from. */
 	const snapshot = (projectPath, sessionId) => {
 		const openspec =
@@ -219,6 +207,11 @@ export function createHandler({ store, proposals, sessions, runner, projectOfSes
 	 * paths that each create changes is two places for the confirmation guarantee
 	 * to be got wrong.
 	 *
+	 * This awaits a whole agent turn — the agent runs the OpenSpec skill, which
+	 * shells out to the CLI once per artifact — so it is the slowest route in the
+	 * plugin by a wide margin. The page's confirm button already renders a
+	 * "正在创建…" state for exactly this wait.
+	 *
 	 * @param {string} sessionId - the session confirming.
 	 * @returns {Promise<{ status: number, body: object }>} the response to send.
 	 */
@@ -259,26 +252,6 @@ export function createHandler({ store, proposals, sessions, runner, projectOfSes
 				return;
 			}
 			const sessionId = query.get('sessionId');
-			// The artifact bodies are fetched per entry rather than carried in the
-			// snapshot: the page polls every few seconds, and shipping every proposed
-			// spec on every tick to render a checklist would be waste.
-			if (pathname === '/draft/entry') {
-				const entry = entryFor(sessionId, query.get('id'));
-				if (entry === undefined) {
-					sendJson(res, 404, errorBody('ENTRY_NOT_FOUND', '这个待确认计划里没有这个条目'));
-					return;
-				}
-				sendJson(res, 200, {
-					id: entry.id,
-					title: entry.title,
-					summary: entry.summary,
-					proposal: entry.proposal,
-					design: entry.design,
-					tasks: entry.tasks,
-					specs: entry.specs,
-				});
-				return;
-			}
 			sendJson(res, 200, snapshot(projectFor(sessionId), sessionId));
 			return;
 		}
@@ -321,8 +294,8 @@ export function createHandler({ store, proposals, sessions, runner, projectOfSes
 							const edit = edits[entry.id];
 							if (edit === null || typeof edit !== 'object') continue;
 							if (typeof edit.include === 'boolean') entry.include = edit.include;
-							// Only the title and summary are editable. The artifact bodies
-							// come from the agent and the tasks are what the loop counts;
+							// Only the title and summary are editable. The documents are the
+							// skill's to write and the tasks are what the loop counts;
 							// hand-editing either here would create a plan the agent never
 							// reasoned about and a tally the loop cannot explain.
 							if (typeof edit.title === 'string' && edit.title.trim().length > 0) entry.title = edit.title.trim();

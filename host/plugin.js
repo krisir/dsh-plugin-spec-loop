@@ -55,8 +55,11 @@ export const inject = ['sessionController', 'webServer', 'sessions', 'agents'];
  * `workspaceRegistry` decides which sidebar group a session appears under. The
  * loop is fully functional without it — the session still runs, in the right
  * directory — so it must not be a hard dependency either.
+ *
+ * `skills` is how the plugin checks, before spending a turn, whether the agent
+ * can actually load the skill that creates changes.
  */
-const OPTIONAL_SERVICES = ['approval', 'commands', 'tools', 'workspaceRegistry'];
+const OPTIONAL_SERVICES = ['approval', 'commands', 'skills', 'tools', 'workspaceRegistry'];
 
 /**
  * The plugin's composition config, validated through Cordis' standard-schema seam.
@@ -157,7 +160,16 @@ export function apply(ctx, config) {
 
 	const privileges = new Privileges(ctx, { services: optionalServices, log });
 	const sessions = new SessionSeam({ ctx, privileges, log });
-	const proposals = new Proposals({ store, commandFor, log });
+	const proposals = new Proposals({
+		store,
+		sessions,
+		commandFor,
+		autoApprove: () => store.settings().autoApprove,
+		// The same knob the rounds use: one budget for "let this session work on its
+		// own", rather than a second invisible one for creation.
+		timeoutMs: () => store.settings().iterationTimeoutMinutes * 60 * 1000,
+		log,
+	});
 	const runner = new RalphRunner({
 		ctx,
 		store,

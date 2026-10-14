@@ -197,19 +197,10 @@ const zh = {
 	'proposal.title': '待确认的计划',
 	'proposal.count': '{total} 个 change，已勾选 {selected} 个',
 	'proposal.include': '创建这个 change',
-	'proposal.noTasks': '没有任务',
-	'proposal.tasks': '{count} 个任务',
-	'proposal.specs': 'capability：{list}',
-	'proposal.noSpecs': '不改变外部行为，会加上 skip_specs',
-	'proposal.problems': '可能通不过校验：{list}',
 	'proposal.dropped': '有 {count} 个条目被丢弃',
-	'proposal.detail': '看全文',
-	'proposal.hideDetail': '收起全文',
-	'proposal.detailLoading': '读取中…',
-	'proposal.detailFailed': '读取失败：{message}',
 	'proposal.confirm': '确认创建 {count} 个 change',
 	'proposal.confirming': '正在创建…',
-	'proposal.confirmHint': '确认后才会在 openspec/changes 下建目录并写入 proposal / specs / design / tasks。',
+	'proposal.confirmHint': '确认之后才由这个会话的 agent 调用 openspec-propose 技能去创建，那时候才会生成 proposal / specs / design / tasks，这一轮要跑一会儿。',
 	'proposal.created': '已创建 {count} 个 change。',
 	'proposal.createdWarnings': '已创建，但有提醒：{list}',
 
@@ -326,19 +317,10 @@ const en = {
 	'proposal.title': 'Plan awaiting confirmation',
 	'proposal.count': '{total} change(s), {selected} selected',
 	'proposal.include': 'Create this change',
-	'proposal.noTasks': 'No tasks',
-	'proposal.tasks': '{count} task(s)',
-	'proposal.specs': 'Capabilities: {list}',
-	'proposal.noSpecs': 'Changes no external behaviour; skip_specs will be set',
-	'proposal.problems': 'May fail validation: {list}',
 	'proposal.dropped': '{count} entr(ies) were dropped',
-	'proposal.detail': 'Full text',
-	'proposal.hideDetail': 'Hide full text',
-	'proposal.detailLoading': 'Loading…',
-	'proposal.detailFailed': 'Could not load: {message}',
 	'proposal.confirm': 'Create {count} change(s)',
 	'proposal.confirming': 'Creating…',
-	'proposal.confirmHint': 'Only after this does anything appear under openspec/changes, with proposal / specs / design / tasks written.',
+	'proposal.confirmHint': 'On confirm the agent in this session runs the openspec-propose skill. Only then are proposal / specs / design / tasks written, and that takes a whole turn.',
 	'proposal.created': 'Created {count} change(s).',
 	'proposal.createdWarnings': 'Created, with warnings: {list}',
 
@@ -511,22 +493,6 @@ function fetchState(sessionId, signal) {
 }
 
 /**
- * Read one proposal entry's full artifact bodies.
- *
- * Fetched on demand rather than carried in the snapshot: the page polls every
- * few seconds while a discussion is open, and every proposed spec on every tick
- * would be a lot of Markdown to render a checklist it does not use.
- *
- * @param {string} sessionId - the session to read for.
- * @param {string} id - the entry id.
- * @param {AbortSignal} [signal] - caller cancellation.
- * @returns {Promise<object>} the entry's artifacts.
- */
-function fetchEntry(sessionId, id, signal) {
-	return apiRequest(`/draft/entry?sessionId=${encodeURIComponent(sessionId)}&id=${encodeURIComponent(id)}`, { signal });
-}
-
-/**
  * Confirm a draft by selecting and renaming its entries.
  * @param {string} sessionId - the session.
  * @param {object} entries - entry id → `{ include?, title?, summary? }`.
@@ -571,7 +537,6 @@ function discardDraft(sessionId) {
 /** The route verbs, so no component has to spell a URL. */
 const api = {
 	init: (sessionId) => post('/init', { sessionId }),
-	fetchEntry,
 	updateDraft,
 	planDraft,
 	applyDraft,
@@ -939,27 +904,6 @@ const STYLESHEET = `
 .sl-proposal-summary { min-height: 38px; font-size: 12px; resize: vertical; font-family: inherit; }
 .sl-proposal-id { font-size: 11.5px; color: var(--dsw-alias-label-secondary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .sl-check { width: 15px; height: 15px; accent-color: var(--dsw-alias-brand-primary); flex: none; cursor: pointer; }
-
-.sl-tasks { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 2px; font-size: 12px; color: var(--dsw-alias-label-secondary); }
-.sl-tasks code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; margin-right: 4px; color: var(--dsw-alias-label-primary); }
-
-.sl-artifacts { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--dsw-alias-border-l1); padding-top: 9px; }
-.sl-artifacts section { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-.sl-pre {
-	margin: 0;
-	padding: 9px;
-	max-height: 320px;
-	overflow: auto;
-	border-radius: 7px;
-	background: var(--dsw-alias-bg-layer-2);
-	border: 1px solid var(--dsw-alias-border-l1);
-	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	font-size: 11.5px;
-	line-height: 1.5;
-	white-space: pre-wrap;
-	word-break: break-word;
-	color: var(--dsw-alias-label-primary);
-}
 
 @media (prefers-reduced-motion: reduce) {
 	.sl-bar-fill { transition: none; }
@@ -1371,40 +1315,24 @@ function SettingsPanel({ t, loop, settings, onClose }) {
 /**
  * One proposed change, as the user reviews it.
  *
- * The title and summary are inputs because those are the two things a user
- * actually wants to correct before saying yes — an id they dislike, a summary
- * that missed the point. The task list is rendered read-only for the same reason
- * it is generated rather than pasted: it is what the loop counts, and a plan
- * whose tally had been hand-edited behind the agent's back would make the first
- * round's progress unexplainable.
+ * There is nothing here but the plan — an id, a title, a summary, and the user's
+ * decision to include it. That is not a simplification for its own sake: the
+ * documents do not exist yet. They are written after confirmation, by the agent
+ * running the OpenSpec skill, so this card is the last chance to correct the
+ * *split* — the one thing that is actually being agreed to here.
  *
- * @param {object} props - `t`, `sessionId`, `entry`, and the edit callbacks.
+ * The title and summary are editable because those are what the change list will
+ * show and what the creating turn is told; the id is not, because it becomes a
+ * directory name that the plugin verifies against, and an id edited here after
+ * the agent proposed it would simply fail to appear.
+ *
+ * @param {object} props - `t`, `entry`, and the edit callbacks.
  * @returns {object} the element.
  */
-function ProposalEntry({ t, sessionId, entry, onToggle, onEdit }) {
-	const [detail, setDetail] = React.useState(null);
-	const [detailError, setDetailError] = React.useState('');
-	const [loading, setLoading] = React.useState(false);
+function ProposalEntry({ t, entry, onToggle, onEdit }) {
 	const included = entry.include !== false;
-
 	const edit = (patch) => onEdit(entry.id, patch);
 
-	/** Load the full artifacts on demand, and cache them on the component. */
-	const toggleDetail = () => {
-		if (detail !== null) {
-			setDetail(null);
-			return;
-		}
-		setLoading(true);
-		setDetailError('');
-		api
-			.fetchEntry(sessionId, entry.id)
-			.then((body) => setDetail(body))
-			.catch((error) => setDetailError(error instanceof Error ? error.message : String(error)))
-			.finally(() => setLoading(false));
-	};
-
-	const specs = entry.specs ?? [];
 	return h(
 		'div',
 		{ className: `sl-proposal${included ? '' : ' sl-proposal-off'}` },
@@ -1426,13 +1354,8 @@ function ProposalEntry({ t, sessionId, entry, onToggle, onEdit }) {
 				'aria-label': t('proposal.title'),
 				onChange: (event) => edit({ title: event.target.value }),
 			}),
-			h(
-				'span',
-				{ className: 'sl-hint sl-row-end' },
-				entry.tasksTotal > 0 ? t('proposal.tasks', { count: entry.tasksTotal }) : t('proposal.noTasks'),
-			),
+			h('code', { className: 'sl-proposal-id' }, entry.id),
 		),
-		h('code', { className: 'sl-proposal-id' }, entry.id),
 		h('textarea', {
 			className: 'sl-textarea sl-proposal-summary',
 			value: entry.summary,
@@ -1441,62 +1364,7 @@ function ProposalEntry({ t, sessionId, entry, onToggle, onEdit }) {
 			'aria-label': t('discuss.title'),
 			onChange: (event) => edit({ summary: event.target.value }),
 		}),
-		specs.length > 0
-			? h('span', { className: 'sl-hint' }, t('proposal.specs', { list: specs.join(', ') }))
-			: h('span', { className: 'sl-hint' }, t('proposal.noSpecs')),
 
-		// The lint result is the review step earning its keep: a plan that would be
-		// rejected by `openspec validate` is visible *before* the user confirms,
-		// instead of surfacing afterwards as a broken change.
-		(entry.problems ?? []).length > 0
-			? h(Notice, { tone: 'warn' }, t('proposal.problems', { list: entry.problems.join('；') }))
-			: null,
-
-		entry.tasksTotal > 0
-			? h(
-					'ul',
-					{ className: 'sl-tasks' },
-					...(entry.tasks ?? []).slice(0, 12).map((task) =>
-						h('li', { key: task.id }, h('code', null, task.id), ` ${task.description}`),
-					),
-				)
-			: null,
-
-		h(
-			'div',
-			{ className: 'sl-row' },
-			h(
-				'button',
-				{ type: 'button', className: 'sl-btn sl-btn-quiet', onClick: toggleDetail },
-				detail === null ? t('proposal.detail') : t('proposal.hideDetail'),
-			),
-			loading ? h('span', { className: 'sl-spinner' }) : null,
-		),
-		detailError.length > 0 ? h(Notice, { tone: 'error' }, t('proposal.detailFailed', { message: detailError })) : null,
-		detail !== null
-			? h(
-					'div',
-					{ className: 'sl-artifacts' },
-					...['proposal', 'design', 'tasks'].map((key) =>
-						detail[key]
-							? h(
-									'section',
-									{ key },
-									h('span', { className: 'sl-label' }, `${key}.md`),
-									h('pre', { className: 'sl-pre' }, detail[key]),
-								)
-							: null,
-					),
-					...(detail.specs ?? []).map((spec) =>
-						h(
-							'section',
-							{ key: spec.capability },
-							h('span', { className: 'sl-label' }, `specs/${spec.capability}/spec.md`),
-							h('pre', { className: 'sl-pre' }, spec.content),
-						),
-					),
-				)
-			: null,
 	);
 }
 
@@ -1560,7 +1428,7 @@ function ProposalPanel({ t, sessionId, loop, discussion }) {
 			'div',
 			{ className: 'sl-list' },
 			...entries.map((entry) =>
-				h(ProposalEntry, { key: entry.id, t, sessionId, entry, onToggle, onEdit }),
+				h(ProposalEntry, { key: entry.id, t, entry, onToggle, onEdit }),
 			),
 		),
 		h('span', { className: 'sl-hint' }, t('proposal.confirmHint')),

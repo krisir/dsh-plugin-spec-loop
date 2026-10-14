@@ -88,22 +88,6 @@ function fetchState(sessionId, signal) {
 }
 
 /**
- * Read one proposal entry's full artifact bodies.
- *
- * Fetched on demand rather than carried in the snapshot: the page polls every
- * few seconds while a discussion is open, and every proposed spec on every tick
- * would be a lot of Markdown to render a checklist it does not use.
- *
- * @param {string} sessionId - the session to read for.
- * @param {string} id - the entry id.
- * @param {AbortSignal} [signal] - caller cancellation.
- * @returns {Promise<object>} the entry's artifacts.
- */
-function fetchEntry(sessionId, id, signal) {
-	return apiRequest(`/draft/entry?sessionId=${encodeURIComponent(sessionId)}&id=${encodeURIComponent(id)}`, { signal });
-}
-
-/**
  * Confirm a draft by selecting and renaming its entries.
  * @param {string} sessionId - the session.
  * @param {object} entries - entry id → `{ include?, title?, summary? }`.
@@ -148,7 +132,6 @@ function discardDraft(sessionId) {
 /** The route verbs, so no component has to spell a URL. */
 const api = {
 	init: (sessionId) => post('/init', { sessionId }),
-	fetchEntry,
 	updateDraft,
 	planDraft,
 	applyDraft,

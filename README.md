@@ -20,7 +20,8 @@
    ├─ 你在页面上勾选 / 取消 / 改标题和摘要
    │        ← 也可以 /spec apply
    │
-   ├─ 确认之后，插件才用 openspec CLI 落盘
+   ├─ 确认之后，插件把这个会话叫回来，让它用 openspec-propose 技能去建
+   │        （插件自己不写任何 change 文件，只按 id 核对结果）
    │        proposal.md / design.md / tasks.md / specs/*/spec.md
    │
    └─ 每个 change 进入 ralph 循环
@@ -49,13 +50,27 @@
 
 ### 为什么创建必须由人来点
 
-**创建权限只在用户手里，模型没有办法创建 change。** 这不是提示词里的请求，而是结构上的事实：
+**创建权限只在用户手里，模型没有办法自己开始。** 这不是提示词里的请求，而是结构上的事实：
 
 - agent 唯一的提交入口是 `spec_loop_propose` 工具，它只往插件状态里写一份 pending 计划；
-- 真正落盘的 `Proposals.apply()` 只从两个地方被调用：`/spec apply`（命令处理器）和页面的确认按钮——两者都是用户动作，而且共用同一段代码；
+- 走创建那一步的 `Proposals.apply()` 只从两个地方被调用：`/spec apply`（命令处理器）和页面的确认按钮——两者都是用户动作，而且共用同一段代码；
 - 所以不管 agent 在讨论里说什么、调多少次工具，`openspec/changes/` 在你确认之前都是空的。
 
-提交计划时会顺手做一遍 lint（`### Requirement:` 下面有没有 `#### Scenario:`、有没有复选框任务、id 是不是合法 kebab-case），问题会显示在审阅界面上，而不是等你确认完才发现 change 是坏的。
+### 为什么 change 文件不由插件写
+
+插件只收一份**计划**：`id`、`title`、`summary`——做什么、为什么它该独立成一个 change。proposal / specs / design / tasks 的正文它一概不收，也不写。
+
+落盘交给 agent 自己：确认之后插件给那个会话发一条提示，点名 `openspec-propose` 技能和每一个已确认的 `id`，然后等这一轮跑完，再回到磁盘上**按 id 逐个核对**。这样做的理由是不要在插件里养一份 OpenSpec 模板的第二实现——模板属于 schema，schema 属于项目配置（`openspec/config.yaml`），而技能是从那里读的；插件抄一份，只会在 OpenSpec 某次升级改了模板之后悄悄跑偏。
+
+核对是硬性的，三种结果都会说出来：
+
+- 请求的 id 都在 → 逐个登记进列表，并把每个 change 的 `tasks.md` 勾选数读回来；
+- 少了一部分 → 建成的照常登记，缺的那几个在结果里点名；
+- 一个都没建成 → 报错，不写任何记录。如果 agent 用了自己发明的名字，报错里会把它一起点出来——那个目录确实在磁盘上，瞒着不说只会让你自己撞见它。
+
+顺带的两条检查也落在这一轮：`tasks.md` 里没有 `- [ ]` 复选框会当场提醒（循环按勾选数统计进展，没有复选框的 change 跑不动），每个建成的 change 都会跑一次 `openspec validate`，结论记在 change 卡上。
+
+这一轮是有等待的：页面上点确认之后按钮变成「正在创建…」，要到 agent 把 `openspec` 命令跑完才回来。它能跑多久用的是**设置里那个「单轮超时」**，和迭代的一轮共用同一个预算——建一个 change 和做完一轮是同一量级的工作，另外藏一个上限只会让你调高了看得见的那个之后仍然被卡住。
 
 ### 讨论的轮数
 
@@ -149,7 +164,7 @@ node install.mjs uninstall --profile desktop
 
 ```bash
 node build.mjs      # src/*.js → client.js
-node --test test/   # 137 个测试
+node --test test/   # 141 个测试
 ```
 
 浏览器那一半的源码按文件名顺序拼接成一个 factory，所以**文件之间不能有相对 `require`**，只能用 `react`。`build.mjs` 会检查这一点。
@@ -168,7 +183,7 @@ pnpm install --dev
 
 **需求讨论** —— 页面**没有**输入框：入口只有 `/spec`。一轮拆分讨论是一次（或者好几次）真正的 agent turn，发生在会话输入框里，而不是在这个面板里；面板负责显示讨论到哪一步、待确认的计划长什么样，以及确认按钮。一个只能打字、却接不上下文的面板比没有更糟。
 
-**待确认的计划** —— 每个条目一张小卡：复选框决定要不要建，标题和摘要可以直接改（这两样是审阅时最想动的东西），下面是插件生成的 `- [ ] 1.1 …` 任务列表。任务列表是只读的：迭代循环就是数这些复选框，手改过之后"这一轮完成了多少"就没法解释了。「看全文」按需拉取这个条目的 proposal / design / tasks / specs 原文——快照每几秒轮询一次，不会把这些 Markdown 一起带上。
+**待确认的计划** —— 每个条目一张小卡：一个复选框决定要不要建，一个可改的标题，一段可改的摘要，加上它的 `id`。卡片上再没有别的东西，因为这个阶段确实没有别的东西：文档还没生成。`id` 是只读的——它会变成目录名，插件确认之后就是按它核对的，在这里改掉只会让那个 change 对不上号。
 
 **change 列表** —— 每个 change 一张卡：
 
@@ -204,7 +219,7 @@ pnpm install --dev
 
 `$DSH_HOME/spec-loop/state.json`（默认 `~/.dsh/spec-loop/state.json`），原子写入（临时文件 + rename）。文档解析失败时会改名成 `state.json.corrupt-<时间戳>` 保留现场，而不是直接覆盖。
 
-讨论状态（需求、状态机、待确认的计划、被丢弃的条目）也在同一个文档里，按 session 存，最多保留 100 条、超出按最久未更新淘汰。待确认计划的正文不落进这个文件：只在你点「看全文」时从内存里的那份计划读。
+讨论状态（需求、状态机、待确认的计划、被丢弃的条目）也在同一个文档里，按 session 存，最多保留 100 条、超出按最久未更新淘汰。待确认的计划写进去的就是它本来的样子——一个词都没多：没有文档正文可存，因为那时候还没有文档。
 
 **仓库里的 `openspec/changes/` 才是真相**：列表只是一个投影。每次 `/state` 都会把磁盘上存在但列表里没有的 change 补进来，所以删掉状态文件也不会丢东西。
 
@@ -229,7 +244,6 @@ pnpm install --dev
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/state?sessionId=` | 整页快照（`discussion` 字段是当前会话的讨论） |
-| GET | `/draft/entry?sessionId=&id=` | 取一个待确认条目的全文（按需，不放进快照） |
 | POST | `/init` | `openspec init . --tools none --no-animation` |
 | POST | `/draft/update` | 勾选 / 取消 / 改标题和摘要 |
 | POST | `/draft/plan` | 催 agent 出计划（和 `/spec plan` 同一条消息） |
@@ -254,18 +268,21 @@ pnpm install --dev
 node --test test/
 ```
 
-137 个测试：
+141 个测试：
 
-- **纯函数** —— `parseSpecCommand` / `normalizeProposal` / `renderTaskMarkdown` / `lintEntry` / `toKebab` / `renderObjective` / `normalizeSettings` / `parseTaskText` 等
+- **纯函数** —— `parseSpecCommand` / `normalizeProposal` / `renderProposalRules` / `renderCreationPrompt` / `toKebab` / `renderObjective` / `normalizeSettings` / `parseTaskText` 等
 - **持久化** —— 原子写、损坏文件改名保留、未知状态归一化、讨论状态按 session 存取与淘汰
 - **客户端契约** —— 语言包 zh/en 键位对齐、页面用到的每个 key 都存在、bundle 只 `require('react')`、`apply` 注册出的 slot 条目（id / order / locale / label / inject）符合预期；会话跳转的三条：有 `uiWorkspace` 时能跳、没它时退化成复制、以及它**晚于**本插件装配时仍然会被认出来（能力是每次渲染现问的，不是在 `apply()` 里钉死的）
 - **渲染** —— 用真实的 React 渲染真实的组件，断言每个状态、每种按钮文案、进度条的 `aria-valuenow`、日志顺序、讨论面板与待确认计划的每种形态，超长错误/摘要不会撑爆卡片，以及会话 chip 的两种形态（能跳时 `▶` + tooltip 说「打开会话」，不能跳时 `◈` + tooltip 说「复制会话 id」）和「还没跑过就没有 chip」
 - **注册契约** —— 把 `commands.register()` / `tools.register()` 的准入规则照抄进测试（schema 子集、命令名字法、handler 返回值形状），断言插件真的交得出合格的定义。服务本身在 app 的模块图里，插件装完是 import 不到的；这份抄写不是权威，但能把"注册了一个会被注册表拒绝的工具"从用户会话里的运行时报错变成一条失败的测试
 - **装配** —— 用一个 stub context 真跑一遍 `apply()`：命令定义、工具定义、路由是否按各自的契约注册；`commands`/`tools` 服务缺失时仍然能加载；命令名撞车时只丢命令不丢插件；非 loopback 的写请求被拒
-- **端到端** —— 在一个临时项目上放一个假的 `openspec` 可执行文件，跑完整的 `/spec → 讨论 → 提交计划 → 确认 → 落盘` 全流程，以及 `RalphRunner` 按轮推进直到 `done`、预算耗尽变 `exhausted`、连续无进展变 `blocked`；提示词两种形态都走真实循环跑一遍：注册表里有 `ralph` 时会要求调用，没有时**一次都不提**，而那一轮照样把活干完；注册表问不动（抛错）时也只是退回「不问」这条路，不会把一轮弄挂；新建的会话会被登记进工作区分组，复用的会话会**再登记一次**（老会话因此自动归位），而目录没有工作区、登记抛错、`resolveByPath` 抛错这三种情况下那一轮照样跑完
+- **创建委派** —— `apply()` 单测，把 session seam 换成一个假 agent：它会建，也会**故意不建**。核对的三条路各测一次（全都建出来 → 逐个登记；少建一个 → 只登记建成的、缺的点名；一个都没建 → 抛错且不写记录），agent 用了自己发明的名字时那种「磁盘上多了个你没批过的目录」会被指出来；技能**确证缺失**时在花掉一轮之前就报错（跳过 `runTurn`）；`tasks.md` 没有复选框时给出提醒；没有会话可委派、以及一个都没勾选时都拒绝，且都不发提示
+- **端到端** —— 在一个临时项目上放一个假的 `openspec` 可执行文件，跑完整的 `/spec → 讨论 → 提交计划 → 确认 → 由 agent 落盘` 全流程，以及 `RalphRunner` 按轮推进直到 `done`、预算耗尽变 `exhausted`、连续无进展变 `blocked`；提示词两种形态都走真实循环跑一遍：注册表里有 `ralph` 时会要求调用，没有时**一次都不提**，而那一轮照样把活干完；注册表问不动（抛错）时也只是退回「不问」这条路，不会把一轮弄挂；新建的会话会被登记进工作区分组，复用的会话会**再登记一次**（老会话因此自动归位），而目录没有工作区、登记抛错、`resolveByPath` 抛错这三种情况下那一轮照样跑完
 - **真 CLI 契约** —— 拿真的 `openspec`（1.9.0）在一个临时项目上跑 `init` / `new change` / `list` / `instructions apply` / `validate`，断言插件依赖的那几个输出字段和退出行为。装了 CLI 才跑，没装就整层跳过。其余测试要么替掉 CLI、要么放一个假的，这对测试**插件**是对的，但 CLI 是另一个程序：它改了而插件没跟上时，一个假的都不会红
 
 端到端那层用一个假的 session seam 替掉宿主，因为它要精确控制"这一轮对 `tasks.md` 做了什么"——而这是循环唯一被允许依赖的东西。假的 `openspec` 是**可执行脚本**而不是被替换的类：这段流程有意思的地方恰恰在于插件真的去 shell 了，换掉 `Openspec` 类就是在测试那个替身。
+
+创建那段流程的替身比别的都关键：那个假 agent 会**按提示词里点到的 id** 把目录建出来，正是技能该做的事。所以断言落在插件的**核对**上——它有没有问、问的时候有没有点名每个 id、回来之后有没有按 id 对账——而不是落在插件写出了什么文件。插件要是哪天又自己写起文件来，这些测试里的 `writes` 会是空的，而对账那几条立刻就会红。
 
 最重要的一条断言是否定的：需求记下、计划提交之后，`openspec/changes/` 仍然是空的。
 
@@ -284,7 +301,7 @@ host/
   discourse.js          /spec 的语法与讨论用的提示词
   command.js            /spec 命令处理器（讨论、催计划、确认、放弃）
   tool.js               spec_loop_propose 工具定义与待确认计划的视图
-  proposal.js           计划的校验/lint/落盘（apply 只从这里进仓库）
+  proposal.js           计划的校验、委派创建、按 id 核对（apply 是唯一的入口）
   ralph.js              ralph 循环（objective 渲染、进度门控、卡住判定）
   session.js            会话接缝（create / prompt / 等一轮结束 / 超时 / 取消）
   privilege.js          无人值守三层授权

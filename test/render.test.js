@@ -215,7 +215,7 @@ test('an open discussion shows the requirement, its state and how to nudge', { s
 	assert.match(markup, /sl-spinner/, 'an open discussion is still being worked on');
 });
 
-test('a pending plan renders each entry with its tasks and a confirm button', { skip: !available }, () => {
+test('a pending plan renders each entry as a plan with a confirm button', { skip: !available }, () => {
 	const { ProposalPanel } = loadComponents();
 	const markup = render(
 		React.createElement(ProposalPanel, {
@@ -229,29 +229,8 @@ test('a pending plan renders each entry with its tasks and a confirm button', { 
 					at: 1,
 					dropped: [],
 					entries: [
-						{
-							id: 'tenant-tables',
-							title: '租户表',
-							summary: '建表',
-							include: true,
-							tasksTotal: 2,
-							tasks: [
-								{ id: '1.1', description: '加租户表' },
-								{ id: '1.2', description: '加行级过滤' },
-							],
-							specs: ['db/tenancy'],
-							problems: [],
-						},
-						{
-							id: 'skipped',
-							title: '不要的',
-							summary: '',
-							include: false,
-							tasksTotal: 1,
-							tasks: [{ id: '2.1', description: '某个任务' }],
-							specs: [],
-							problems: [],
-						},
+						{ id: 'tenant-tables', title: '租户表', summary: '建表', include: true },
+						{ id: 'skipped', title: '不要的', summary: '', include: false },
 					],
 				},
 			},
@@ -261,17 +240,17 @@ test('a pending plan renders each entry with its tasks and a confirm button', { 
 	assert.match(markup, /proposal\.count\(\{&quot;total&quot;:2,&quot;selected&quot;:1\}\)/);
 	assert.match(markup, /proposal\.confirm\(\{&quot;count&quot;:1\}\)/);
 	assert.match(markup, /tenant-tables/);
-	assert.match(markup, /加租户表/);
-	assert.match(markup, /db\/tenancy/);
+	assert.match(markup, /建表/);
 	// The unselected entry stays visible — it is how the user changes their mind —
 	// but its controls are off.
 	assert.match(markup, /skipped/);
 	assert.match(markup, /sl-proposal-off/);
-	// A capability-less change is explained rather than left looking unfinished.
-	assert.match(markup, /proposal\.noSpecs/);
+	// Nothing else is claimed about the change: the documents do not exist yet.
+	assert.doesNotMatch(markup, /proposal\.noTasks/);
+	assert.doesNotMatch(markup, /proposal\.tasks/);
 });
 
-test('an entry with a lint problem says so before the user confirms', { skip: !available }, () => {
+test('the plan card edits a title in place without claiming artifacts exist', { skip: !available }, () => {
 	const { ProposalPanel } = loadComponents();
 	const markup = render(
 		React.createElement(ProposalPanel, {
@@ -283,27 +262,17 @@ test('an entry with a lint problem says so before the user confirms', { skip: !a
 				requirement: 'x',
 				proposal: {
 					at: 1,
-					dropped: [{ id: 'no-tasks', reason: 'tasks 里没有任何复选框任务' }],
-					entries: [
-						{
-							id: 'themed',
-							title: '主题',
-							summary: '',
-							include: true,
-							tasksTotal: 1,
-							tasks: [{ id: '1.1', description: '做一个开关' }],
-							specs: ['ui/theming'],
-							problems: ['ui/theming：「没有场景」下面没有 `#### Scenario:`'],
-						},
-					],
+					dropped: [{ id: 'no-title', reason: '没有标题' }],
+					entries: [{ id: 'themed', title: '主题', summary: '做主题', include: true }],
 				},
 			},
 		}),
 	);
-	assert.match(markup, /proposal\.problems/);
-	assert.match(markup, /没有场景/);
 	assert.match(markup, /proposal\.dropped\(\{&quot;count&quot;:1\}\)/);
-	assert.match(markup, /no-tasks/);
+	assert.match(markup, /no-title/);
+	assert.match(markup, /做主题/);
+	// The confirm hint has to be honest about *when* the documents appear.
+	assert.match(markup, /proposal\.confirmHint/);
 });
 
 test('the confirm button is disabled when nothing is selected', { skip: !available }, () => {
@@ -320,7 +289,7 @@ test('the confirm button is disabled when nothing is selected', { skip: !availab
 					at: 1,
 					dropped: [],
 					entries: [
-						{ id: 'only', title: '唯一', summary: '', include: false, tasksTotal: 1, tasks: [{ id: '1.1', description: 'x' }], specs: [], problems: [] },
+						{ id: 'only', title: '唯一', summary: '', include: false },
 					],
 				},
 			},
@@ -478,7 +447,7 @@ test('the loaded page shows a pending plan and its confirm button', { skip: !ava
 					at: 1,
 					dropped: [],
 					entries: [
-						{ id: 'tenancy', title: '租户隔离', summary: '', include: true, tasksTotal: 1, tasks: [{ id: '1.1', description: '加列' }], specs: [], problems: [] },
+						{ id: 'tenancy', title: '租户隔离', summary: '', include: true },
 					],
 				},
 			},

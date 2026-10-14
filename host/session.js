@@ -260,6 +260,40 @@ export class SessionSeam {
 	}
 
 	/**
+	 * Whether a skill is *known to be* missing for a session's agent.
+	 *
+	 * Phrased as a negative because that is the only answer worth acting on: the
+	 * plugin uses this to refuse a creation before spending a turn on it, and it may
+	 * only refuse on proof. `snapshot` reports whether discovery finished, and its
+	 * own contract says an incomplete observation is never cached and should be
+	 * retried — so an incomplete catalog means "not known", never "absent". Denying
+	 * a user's confirmed creation because the catalog was still loading would be a
+	 * worse failure than letting the turn try and reporting the real outcome.
+	 *
+	 * @param {string} name - the kebab-case skill name.
+	 * @param {string} sessionId - the session whose agent's layers are wanted.
+	 * @param {string} [cwd] - the project root, for workspace-sensitive skills.
+	 * @returns {Promise<boolean>} true only when the skill is provably absent.
+	 */
+	async skillMissing(name, sessionId, cwd) {
+		try {
+			const skills = this.ctx.get?.('skills') ?? this.ctx.skills;
+			if (skills === undefined) return false;
+			const agent = await this.#resolveAgent(sessionId);
+			if (agent === undefined) return false;
+			const view = { scope: agent };
+			if (typeof cwd === 'string' && cwd.length > 0) view.cwd = cwd;
+			if (typeof skills.snapshot !== 'function') return false;
+			const snapshot = await skills.snapshot(view);
+			if (snapshot?.complete !== true) return false;
+			return !(snapshot.skills ?? []).some((skill) => skill.name === name);
+		} catch (error) {
+			this.log(`无法确认技能 ${name} 是否可用：${String(error)}`);
+			return false;
+		}
+	}
+
+	/**
 	 * Send one prompt and resolve once its turn has ended.
 	 *
 	 * @param {object} options - the round.

@@ -202,7 +202,11 @@ export function newDraft(sessionId, options = {}) {
 }
 
 /**
- * Normalize one agent-proposed change into the shape the page and the writer use.
+ * Normalize one agent-proposed change into the shape the page and the creator use.
+ *
+ * A plan entry is three fields, because that is all the agent submits: the
+ * artifacts it will later write are the `openspec-propose` skill's output, not
+ * something the plugin collects up front and replays.
  *
  * `include` is the user's selection and is the only field here the agent does not
  * control: rejecting a change is the user's prerogative, and defaulting to
@@ -216,10 +220,6 @@ export function newProposalEntry(source) {
 		id: source.id,
 		title: source.title,
 		summary: source.summary,
-		proposal: source.proposal,
-		design: source.design,
-		tasks: source.tasks,
-		specs: source.specs,
 		include: true,
 	};
 }
@@ -249,12 +249,6 @@ function normalizeDraft(raw, sessionId) {
 				id: entry.id,
 				title: typeof entry.title === 'string' ? entry.title : entry.id,
 				summary: typeof entry.summary === 'string' ? entry.summary : '',
-				proposal: typeof entry.proposal === 'string' ? entry.proposal : '',
-				design: typeof entry.design === 'string' ? entry.design : '',
-				tasks: typeof entry.tasks === 'string' ? entry.tasks : '',
-				specs: Array.isArray(entry.specs)
-					? entry.specs.filter((spec) => spec !== null && typeof spec === 'object')
-					: [],
 			}),
 			include: entry.include !== false,
 		}));

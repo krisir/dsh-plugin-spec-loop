@@ -383,40 +383,24 @@ function SettingsPanel({ t, loop, settings, onClose }) {
 /**
  * One proposed change, as the user reviews it.
  *
- * The title and summary are inputs because those are the two things a user
- * actually wants to correct before saying yes — an id they dislike, a summary
- * that missed the point. The task list is rendered read-only for the same reason
- * it is generated rather than pasted: it is what the loop counts, and a plan
- * whose tally had been hand-edited behind the agent's back would make the first
- * round's progress unexplainable.
+ * There is nothing here but the plan — an id, a title, a summary, and the user's
+ * decision to include it. That is not a simplification for its own sake: the
+ * documents do not exist yet. They are written after confirmation, by the agent
+ * running the OpenSpec skill, so this card is the last chance to correct the
+ * *split* — the one thing that is actually being agreed to here.
  *
- * @param {object} props - `t`, `sessionId`, `entry`, and the edit callbacks.
+ * The title and summary are editable because those are what the change list will
+ * show and what the creating turn is told; the id is not, because it becomes a
+ * directory name that the plugin verifies against, and an id edited here after
+ * the agent proposed it would simply fail to appear.
+ *
+ * @param {object} props - `t`, `entry`, and the edit callbacks.
  * @returns {object} the element.
  */
-function ProposalEntry({ t, sessionId, entry, onToggle, onEdit }) {
-	const [detail, setDetail] = React.useState(null);
-	const [detailError, setDetailError] = React.useState('');
-	const [loading, setLoading] = React.useState(false);
+function ProposalEntry({ t, entry, onToggle, onEdit }) {
 	const included = entry.include !== false;
-
 	const edit = (patch) => onEdit(entry.id, patch);
 
-	/** Load the full artifacts on demand, and cache them on the component. */
-	const toggleDetail = () => {
-		if (detail !== null) {
-			setDetail(null);
-			return;
-		}
-		setLoading(true);
-		setDetailError('');
-		api
-			.fetchEntry(sessionId, entry.id)
-			.then((body) => setDetail(body))
-			.catch((error) => setDetailError(error instanceof Error ? error.message : String(error)))
-			.finally(() => setLoading(false));
-	};
-
-	const specs = entry.specs ?? [];
 	return h(
 		'div',
 		{ className: `sl-proposal${included ? '' : ' sl-proposal-off'}` },
@@ -438,13 +422,8 @@ function ProposalEntry({ t, sessionId, entry, onToggle, onEdit }) {
 				'aria-label': t('proposal.title'),
 				onChange: (event) => edit({ title: event.target.value }),
 			}),
-			h(
-				'span',
-				{ className: 'sl-hint sl-row-end' },
-				entry.tasksTotal > 0 ? t('proposal.tasks', { count: entry.tasksTotal }) : t('proposal.noTasks'),
-			),
+			h('code', { className: 'sl-proposal-id' }, entry.id),
 		),
-		h('code', { className: 'sl-proposal-id' }, entry.id),
 		h('textarea', {
 			className: 'sl-textarea sl-proposal-summary',
 			value: entry.summary,
@@ -453,62 +432,7 @@ function ProposalEntry({ t, sessionId, entry, onToggle, onEdit }) {
 			'aria-label': t('discuss.title'),
 			onChange: (event) => edit({ summary: event.target.value }),
 		}),
-		specs.length > 0
-			? h('span', { className: 'sl-hint' }, t('proposal.specs', { list: specs.join(', ') }))
-			: h('span', { className: 'sl-hint' }, t('proposal.noSpecs')),
 
-		// The lint result is the review step earning its keep: a plan that would be
-		// rejected by `openspec validate` is visible *before* the user confirms,
-		// instead of surfacing afterwards as a broken change.
-		(entry.problems ?? []).length > 0
-			? h(Notice, { tone: 'warn' }, t('proposal.problems', { list: entry.problems.join('；') }))
-			: null,
-
-		entry.tasksTotal > 0
-			? h(
-					'ul',
-					{ className: 'sl-tasks' },
-					...(entry.tasks ?? []).slice(0, 12).map((task) =>
-						h('li', { key: task.id }, h('code', null, task.id), ` ${task.description}`),
-					),
-				)
-			: null,
-
-		h(
-			'div',
-			{ className: 'sl-row' },
-			h(
-				'button',
-				{ type: 'button', className: 'sl-btn sl-btn-quiet', onClick: toggleDetail },
-				detail === null ? t('proposal.detail') : t('proposal.hideDetail'),
-			),
-			loading ? h('span', { className: 'sl-spinner' }) : null,
-		),
-		detailError.length > 0 ? h(Notice, { tone: 'error' }, t('proposal.detailFailed', { message: detailError })) : null,
-		detail !== null
-			? h(
-					'div',
-					{ className: 'sl-artifacts' },
-					...['proposal', 'design', 'tasks'].map((key) =>
-						detail[key]
-							? h(
-									'section',
-									{ key },
-									h('span', { className: 'sl-label' }, `${key}.md`),
-									h('pre', { className: 'sl-pre' }, detail[key]),
-								)
-							: null,
-					),
-					...(detail.specs ?? []).map((spec) =>
-						h(
-							'section',
-							{ key: spec.capability },
-							h('span', { className: 'sl-label' }, `specs/${spec.capability}/spec.md`),
-							h('pre', { className: 'sl-pre' }, spec.content),
-						),
-					),
-				)
-			: null,
 	);
 }
 
@@ -572,7 +496,7 @@ function ProposalPanel({ t, sessionId, loop, discussion }) {
 			'div',
 			{ className: 'sl-list' },
 			...entries.map((entry) =>
-				h(ProposalEntry, { key: entry.id, t, sessionId, entry, onToggle, onEdit }),
+				h(ProposalEntry, { key: entry.id, t, entry, onToggle, onEdit }),
 			),
 		),
 		h('span', { className: 'sl-hint' }, t('proposal.confirmHint')),

@@ -1,29 +1,65 @@
 /**
  * The flow the feature exists for: discuss, propose, confirm, create.
  *
- * Driven through the real command handler, the real tool, and the real HTTP
- * route against a fake `openspec` on disk. The one thing that is stubbed is the
- * agent's turn — a test cannot wait for a model — so the handler's submitted
- * prompt is recorded and the tool is called by the test, exactly as the agent
- * would call it. Everything between those two points is the shipped code.
+ * Driven through the real command handler, the real tool, the real HTTP route,
+ * and the real turn machinery in `session.js`, against a fake `openspec` on disk.
+ * Two things are stubbed, and both are stubbed because a test cannot wait for a
+ * model: the model's answers, and the *work* the model does when it runs the
+ * OpenSpec skill.
  *
- * The assertion that matters most is the negative one: after the requirement is
- * recorded and the plan is proposed, `openspec/changes` is still empty. Creation
- * happens on the user's confirm, and not one step earlier.
+ * That second stub is the whole point of the current design. The plugin does not
+ * write change files any more — it asks the agent to, and then checks the result.
+ * So `prompt` below plays the agent: it creates exactly the change directories the
+ * creation prompt names, from artifacts the test supplies, and reports the turn
+ * running → idle the way a real one would. If the plugin ever went back to
+ * writing files itself, these tests would still pass while the marker was absent
+ * — which is why `writes` records what the *stub* created, and the assertions are
+ * about the plugin's verification of it rather than about the plugin's output.
+ *
+ * The assertion that matters most is still the negative one: after the requirement
+ * is recorded and the plan is proposed, `openspec/changes` is still empty.
+ * Creation happens on the user's confirm, and not one step earlier.
  */
 
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
+import { CREATION_MARKER } from '../host/proposal.js';
 import { apply } from '../host/plugin.js';
 import { createdChanges, configFor, fakeOpenspec, stubContext } from './helpers.js';
 
 const SESSION = 'session-1';
 
-const GROUPS = [{ group: '后端', items: ['加租户表', '加行级过滤'] }];
+/** The tasks.md the stubbed skill writes: four boxes, one already ticked. */
+const TASKS_MD = [
+	'## 1. 后端',
+	'',
+	'- [ ] 1.1 加租户表',
+	'- [x] 1.2 加行级过滤',
+	'- [ ] 1.3 补测试',
+	'- [ ] 1.4 写文档',
+	'',
+].join('\n');
+
+/** The proposal.md the stubbed skill writes. */
+const PROPOSAL_MD = '## Why\n\n这一段说明为什么需要这个 change，写够长以便断言。\n';
+
+/**
+ * The ids a creation prompt asks for, in the order it lists them.
+ *
+ * Parsed out of the prompt rather than handed to the stub by the test, so that a
+ * prompt which stopped naming its ids — and therefore stopped being verifiable —
+ * would show up as a stub that created nothing.
+ *
+ * @param {string} text - the prompt.
+ * @returns {string[]} the ids.
+ */
+function idsInPrompt(text) {
+	return [...text.matchAll(/^\d+\. `([^`]+)`/gm)].map((match) => match[1]);
+}
 
 const SPEC = [
 	'## Purpose',
@@ -56,15 +92,59 @@ function harness(t, options = {}) {
 	const cli = fakeOpenspec(state, options);
 	const { ctx, commands, tools, routes, logs } = stubContext(t, { cwd: project });
 	const prompts = [];
+	const writes = [];
+
+	// The agent must be one stable object: `runTurn` completes a turn by watching
+	// the agent go running → idle, and a stub that minted a fresh agent per lookup
+	// could never report that transition.
+	const agent = { id: SESSION, status: 'idle', session: { id: SESSION, cwd: project } };
+	ctx.agents = { get: (id) => (id === SESSION ? agent : undefined) };
+	ctx.sessionController.resolveAgent = async (id) => (id === SESSION ? { agent } : { error: { code: 'NOT_FOUND' } });
+
+	const listeners = [];
+	ctx.on = (event, handler) => {
+		if (event !== 'agent/status') return () => {};
+		listeners.push(handler);
+		return () => {
+			const index = listeners.indexOf(handler);
+			if (index >= 0) listeners.splice(index, 1);
+		};
+	};
+	const transition = (status) => {
+		agent.status = status;
+		for (const handler of [...listeners]) handler({ agent, status });
+	};
+
+	/** Create one change the way the OpenSpec skill would, for the stub's benefit. */
+	const skillCreates = (id) => {
+		const made = options.artifacts?.[id] ?? {};
+		const dir = join(project, 'openspec', 'changes', id);
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, 'proposal.md'), made.proposal ?? PROPOSAL_MD);
+		writeFileSync(join(dir, 'tasks.md'), made.tasks ?? TASKS_MD);
+		for (const spec of made.specs ?? []) {
+			const target = join(dir, 'specs', ...spec.capability.split('/'));
+			mkdirSync(target, { recursive: true });
+			writeFileSync(join(target, 'spec.md'), spec.content);
+		}
+		writes.push(id);
+	};
+
 	ctx.sessionController.prompt = async (request) => {
 		prompts.push(request);
+		const text = request.content[0].text;
+		if (text.includes(CREATION_MARKER)) {
+			transition('running');
+			for (const id of idsInPrompt(text)) skillCreates(id);
+			transition('idle');
+		}
 		return { admitted: true };
 	};
 	apply(ctx, configFor(state, { openspecCommand: cli }));
 	const run = (rawInput) => commands[0].handler({ agent: { session: { id: SESSION } }, rawInput });
 	const propose = (args) => tools[0].execute(args, { agent: { session: { id: SESSION } } });
 	t.after(() => rmSync(root, { recursive: true, force: true }));
-	return { project, state, cli, ctx, commands, tools, routes, logs, prompts, run, propose };
+	return { project, state, cli, ctx, commands, tools, routes, logs, prompts, writes, run, propose };
 }
 
 /** The snapshot the page would render. */
@@ -158,8 +238,8 @@ test('the proposed plan waits in the snapshot and nothing is on disk', async (t)
 	await h.run('给后台加多租户隔离');
 	const value = h.propose({
 		changes: [
-			{ id: 'tenant-tables', title: '租户表', summary: '建表', tasks: GROUPS, specs: [{ capability: 'db/tenancy', content: SPEC }] },
-			{ id: 'row-filter', title: '行级过滤', summary: '依赖：tenant-tables', tasks: GROUPS, specs: [] },
+			{ id: 'tenant-tables', title: '租户表', summary: '建表' },
+			{ id: 'row-filter', title: '行级过滤', summary: '依赖：tenant-tables' },
 		],
 	});
 	assert.equal(value.status, 'accepted');
@@ -169,38 +249,58 @@ test('the proposed plan waits in the snapshot and nothing is on disk', async (t)
 	assert.equal(state.discussion.proposal.entries.length, 2);
 	assert.deepEqual(state.discussion.proposal.entries.map((entry) => entry.id), ['tenant-tables', 'row-filter']);
 	assert.equal(state.discussion.proposal.entries[0].include, true);
-	assert.deepEqual(state.discussion.proposal.entries[0].specs, ['db/tenancy']);
-	assert.deepEqual(state.discussion.proposal.entries[0].tasks.map((task) => task.id), ['1.1', '1.2']);
-	// The artifact bodies stay on the host: the snapshot carries no markdown.
+	assert.equal(state.discussion.proposal.entries[0].summary, '建表');
+	// The plan is all there is: no artifact bodies are collected, because the
+	// plugin is not the thing that will write them.
+	assert.equal('tasks' in state.discussion.proposal.entries[0], false);
+	assert.equal('specs' in state.discussion.proposal.entries[0], false);
 	assert.equal('proposal' in state.discussion.proposal.entries[0], false);
-	// Still nothing created.
-	assert.equal(createdChanges(h.project).length === 0 || true, true);
+	// Still nothing created, and nothing asked of the agent yet.
+	assert.deepEqual(createdChanges(h.project), []);
+	assert.equal(h.writes.length, 0);
+	// The rules the agent was given say so, in as many words.
+	assert.match(value.message, /不要创建任何目录或文件/);
 });
 
-test('confirming creates the selected changes with their artifacts', async (t) => {
-	const h = harness(t);
+test('confirming sends the agent to create the changes, through the skill', async (t) => {
+	const h = harness(t, {
+		artifacts: {
+			'tenant-tables': { specs: [{ capability: 'db/tenancy', content: SPEC }] },
+			'row-filter': { specs: [] },
+		},
+	});
 	await h.run('给后台加多租户隔离');
 	h.propose({
 		changes: [
-			{ id: 'tenant-tables', title: '租户表', summary: '建表', tasks: GROUPS, specs: [{ capability: 'db/tenancy', content: SPEC }] },
-			{ id: 'row-filter', title: '行级过滤', summary: '过滤', tasks: GROUPS, specs: [] },
+			{ id: 'tenant-tables', title: '租户表', summary: '建表' },
+			{ id: 'row-filter', title: '行级过滤', summary: '过滤' },
 		],
 	});
 	const result = await h.run('apply');
 	assert.equal(result.kind, 'success');
-	assert.match(result.text, /已创建 2 个 change/);
+	assert.match(result.text, /已由 `openspec-propose` 技能创建 2 个 change/);
 
+	// The plugin's contribution is the *asking*: one more prompt, and it names the
+	// skill and every id the user approved.
+	assert.equal(h.prompts.length, 2);
+	const creation = h.prompts[1].content[0].text;
+	assert.match(creation, /openspec-propose/);
+	assert.match(creation, /`tenant-tables`/);
+	assert.match(creation, /`row-filter`/);
+	assert.match(creation, /目录名必须严格等于/);
+
+	// The files exist because the stub agent made them, and they are its work: the
+	// plugin read them back rather than writing them.
+	assert.deepEqual(h.writes, ['tenant-tables', 'row-filter']);
 	assert.deepEqual(createdChanges(h.project), ['row-filter', 'tenant-tables']);
 	const changeDir = join(h.project, 'openspec', 'changes', 'tenant-tables');
 	assert.match(readFileSync(join(changeDir, 'proposal.md'), 'utf8'), /## Why/);
-	assert.match(readFileSync(join(changeDir, 'tasks.md'), 'utf8'), /- \[ \] 1\.1 加租户表/);
 	assert.match(readFileSync(join(changeDir, 'specs', 'db', 'tenancy', 'spec.md'), 'utf8'), /### Requirement: 数据按租户隔离/);
-	// A change with no specs is legitimate and is marked so validation accepts it.
-	assert.match(readFileSync(join(h.project, 'openspec', 'changes', 'row-filter', '.openspec.yaml'), 'utf8'), /skip_specs: true/);
 
 	const state = await snapshot(h);
 	assert.equal(state.discussion, null, 'the discussion closes once the plan is applied');
 	assert.deepEqual(state.changes.map((change) => change.id), ['tenant-tables', 'row-filter']);
+	// The tally comes off the tasks.md the agent wrote, not off the plan.
 	assert.equal(state.changes[0].tasksTotal, 4);
 	assert.equal(state.changes[0].tasksDone, 1);
 	assert.equal(state.changes[0].title, '租户表');
@@ -211,8 +311,8 @@ test('unchecking an entry keeps it out of the repository', async (t) => {
 	await h.run('加多租户');
 	h.propose({
 		changes: [
-			{ id: 'keep-me', title: '留下', summary: '', tasks: GROUPS },
-			{ id: 'drop-me', title: '去掉', summary: '', tasks: GROUPS },
+			{ id: 'keep-me', title: '留下', summary: '' },
+			{ id: 'drop-me', title: '去掉', summary: '' },
 		],
 	});
 	// The page writes edits through this route; titled renames travel with it.
@@ -224,6 +324,8 @@ test('unchecking an entry keeps it out of the repository', async (t) => {
 
 	const result = await h.run('apply');
 	assert.equal(result.kind, 'success');
+	// Only the selected id was ever named to the agent, so only it was created.
+	assert.deepEqual(h.writes, ['keep-me']);
 	assert.deepEqual(createdChanges(h.project), ['keep-me']);
 	const state = await snapshot(h);
 	assert.equal(state.changes.length, 1);
@@ -234,7 +336,7 @@ test('unchecking an entry keeps it out of the repository', async (t) => {
 test('apply refuses when nothing is selected', async (t) => {
 	const h = harness(t);
 	await h.run('加多租户');
-	h.propose({ changes: [{ id: 'only', title: '唯一', summary: '', tasks: GROUPS }] });
+	h.propose({ changes: [{ id: 'only', title: '唯一', summary: '' }] });
 	await post(h, '/draft/update', { sessionId: SESSION, entries: { only: { include: false } } });
 	const result = await h.run('apply');
 	assert.equal(result.kind, 'error');
@@ -252,7 +354,7 @@ test('apply before a plan exists is refused, not a crash', async (t) => {
 test('the propose tool cannot create anything, only a command can', async (t) => {
 	const h = harness(t);
 	await h.run('加多租户');
-	h.propose({ changes: [{ id: 'pending', title: '等待', summary: '', tasks: GROUPS }] });
+	h.propose({ changes: [{ id: 'pending', title: '等待', summary: '' }] });
 	// Proposed, applied nowhere: whatever the agent does through the tool, the
 	// repository is untouched until the user confirms.
 	assert.equal(createdChanges(h.project).length, 0);
@@ -262,8 +364,8 @@ test('the propose tool cannot create anything, only a command can', async (t) =>
 test('a second propose replaces the pending plan', async (t) => {
 	const h = harness(t);
 	await h.run('加多租户');
-	h.propose({ changes: [{ id: 'first', title: '一', summary: '', tasks: GROUPS }] });
-	h.propose({ changes: [{ id: 'second', title: '二', summary: '', tasks: GROUPS }] });
+	h.propose({ changes: [{ id: 'first', title: '一', summary: '' }] });
+	h.propose({ changes: [{ id: 'second', title: '二', summary: '' }] });
 	const state = await snapshot(h);
 	assert.deepEqual(state.discussion.proposal.entries.map((entry) => entry.id), ['second']);
 	// An id from a replaced plan is free again: it was never created.
@@ -283,7 +385,7 @@ test('the snapshot names the project and the session that owns it', async (t) =>
 test('/spec cancel drops the plan and creates nothing', async (t) => {
 	const h = harness(t);
 	await h.run('加多租户');
-	h.propose({ changes: [{ id: 'pending', title: '等待', summary: '', tasks: GROUPS }] });
+	h.propose({ changes: [{ id: 'pending', title: '等待', summary: '' }] });
 	const result = await h.run('cancel');
 	assert.equal(result.kind, 'success');
 	assert.equal((await snapshot(h)).discussion, null);
@@ -294,7 +396,7 @@ test('/spec list reports the changes that were confirmed', async (t) => {
 	const h = harness(t);
 	assert.match((await h.run('list')).text, /还没有任何 change/);
 	await h.run('加多租户');
-	h.propose({ changes: [{ id: 'one', title: '一个', summary: '', tasks: GROUPS }] });
+	h.propose({ changes: [{ id: 'one', title: '一个', summary: '' }] });
 	await h.run('apply');
 	const text = (await h.run('list')).text;
 	assert.match(text, /共 1 个 change/);
@@ -309,7 +411,7 @@ test('/spec plan nudges the agent and is refused once a plan is pending', async 
 	assert.equal(h.prompts.length, 2);
 	assert.match(h.prompts[1].content[0].text, /当前的理解整理成计划/);
 
-	h.propose({ changes: [{ id: 'one', title: '一', summary: '', tasks: GROUPS }] });
+	h.propose({ changes: [{ id: 'one', title: '一', summary: '' }] });
 	const again = await h.run('plan');
 	assert.equal(again.kind, 'success');
 	assert.equal(h.prompts.length, 3, 'the command still nudges; the page route is what refuses');
@@ -318,7 +420,7 @@ test('/spec plan nudges the agent and is refused once a plan is pending', async 
 test('the page route for the plan nudge refuses while a plan is pending', async (t) => {
 	const h = harness(t);
 	await h.run('加多租户');
-	h.propose({ changes: [{ id: 'one', title: '一', summary: '', tasks: GROUPS }] });
+	h.propose({ changes: [{ id: 'one', title: '一', summary: '' }] });
 	const res = await post(h, '/draft/plan', { sessionId: SESSION });
 	assert.equal(res.statusCode, 409);
 	assert.equal(res.body.error.code, 'ALREADY_PROPOSED');
@@ -329,7 +431,7 @@ test('/spec with no argument explains where the discussion stands', async (t) =>
 	assert.match((await h.run('')).text, /还没有讨论中的需求/);
 	await h.run('加多租户');
 	assert.match((await h.run('status')).text, /讨论中/);
-	h.propose({ changes: [{ id: 'one', title: '一', summary: '', tasks: GROUPS }] });
+	h.propose({ changes: [{ id: 'one', title: '一', summary: '' }] });
 	const text = (await h.run('状态')).text;
 	assert.match(text, /计划已提交，等你确认/);
 	assert.match(text, /\[x\] one — 一/);
@@ -338,7 +440,7 @@ test('/spec with no argument explains where the discussion stands', async (t) =>
 test('a failing validate is reported on the change, not hidden', async (t) => {
 	const h = harness(t, { failValidate: true });
 	await h.run('加多租户');
-	h.propose({ changes: [{ id: 'broken', title: '坏的', summary: '', tasks: GROUPS, specs: [{ capability: 'x', content: SPEC }] }] });
+	h.propose({ changes: [{ id: 'broken', title: '坏的', summary: '' }] });
 	const result = await h.run('apply');
 	assert.equal(result.kind, 'success');
 	assert.match(result.text, /openspec validate 未通过/);

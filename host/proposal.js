@@ -6,77 +6,49 @@
  * specs, its config rules — and that is exactly what an agent with file tools
  * can read and a regex cannot.
  *
- * What the plugin keeps control of is the *shape* of the result. The agent hands
- * over a plan through the `spec_loop_propose` tool, and this module validates it,
- * sanitizes the ids, renders the task list into the checkbox format the loop
- * counts, creates the change directories through the OpenSpec CLI, writes the
- * artifacts, and validates each change. So a hallucinated layout cannot put
- * malformed files into `openspec/changes/`, and the user gets a specific
- * complaint instead of a silently broken change.
+ * What this module keeps control of is *when* anything is created, and *that the
+ * result is real*. The agent discusses and then hands over a plan through the
+ * `spec_loop_propose` tool — ids, titles, and why each is its own change, and
+ * nothing else. The documents are deliberately not the plugin's to write.
+ * Creating an OpenSpec change means running `openspec new change`, honouring the
+ * project's configured schema, and laying out proposal / specs / design / tasks
+ * the way that schema and its validator expect — and the `openspec-propose` skill
+ * already knows how to do exactly that. Re-implementing it here would mean a
+ * second implementation that drifts from the installed CLI the first time OpenSpec
+ * changes a template.
  *
- * Nothing here writes anything until the user confirms. The agent proposes, this
- * module normalizes and lints, and `apply()` — reached only from the user's own
- * confirm action — is what touches the repository.
+ * So on the user's confirm this module hands the job back: it sends the agent a
+ * prompt naming the exact ids and telling it to run that skill, waits for the
+ * turn to end, and then checks every requested id against what is actually on
+ * disk. A plan that produced no change directory is reported as a failure, not
+ * papered over with files the plugin wrote itself.
+ *
+ * Nothing here creates anything until the user confirms. The agent proposes, the
+ * user confirms, the agent creates, and this module verifies and registers.
  *
  * @module dsh-plugin-spec-loop/proposal
  */
 
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-import { Openspec, OpenspecError, changeIdsOnDisk } from './openspec.js';
+import { Openspec, OpenspecError, changeIdsOnDisk, readTasks } from './openspec.js';
 
-/** The four artifact templates of the default `spec-driven` schema. */
-const TEMPLATES = {
-	proposal: `## Why
+/**
+ * The skill the agent runs to create the changes.
+ *
+ * Named here rather than left to the prompt's prose because the plugin both
+ * checks for it up front and reports its absence by name.
+ */
+export const CREATE_SKILL = 'openspec-propose';
 
-## What Changes
-
-## Capabilities
-
-### New Capabilities
-- \`<capability-path>\`: <这个能力覆盖什么>
-
-### Modified Capabilities
-- \`<existing-capability-path>\`: <改变了哪条需求>
-
-## Impact
-`,
-	spec: `## Purpose
-
-<新能力用一两句话说明这个能力是干什么的，50 字以上>
-
-## ADDED Requirements
-
-### Requirement: <需求名>
-<需求正文，用 SHALL / MUST 表述可验证的约束>
-
-#### Scenario: <场景名>
-- **WHEN** <条件>
-- **THEN** <预期结果>
-`,
-	design: `## Context
-
-## Goals / Non-Goals
-
-**Goals:**
-
-**Non-Goals:**
-
-## Decisions
-
-## Risks / Trade-offs
-`,
-	tasks: `## 1. <任务分组名>
-
-- [ ] 1.1 <任务描述>
-- [ ] 1.2 <任务描述>
-
-## 2. <任务分组名>
-
-- [ ] 2.1 <任务描述>
-`,
-};
+/**
+ * The first line of the creation prompt.
+ *
+ * Exported because a test that re-types this string is a test that stops testing
+ * the real prompt the moment someone edits the wording.
+ */
+export const CREATION_MARKER = '【Spec Loop · 创建已确认的 change】';
 
 /** A proposal that could not be turned into changes. */
 export class ProposalError extends Error {
@@ -102,91 +74,21 @@ export function toKebab(value) {
 }
 
 /**
- * Render grouped task items into the `tasks.md` the loop counts.
- *
- * The agent supplies the items, not the markdown, because the loop's progress
- * accounting depends on every task being a `- [ ] X.Y …` line — and the one
- * thing a model reliably gets wrong when asked for markdown is exactly that.
- * Numbering is assigned here so the ids are always dense and ordered.
- *
- * @param {Array<{ group?: unknown, items?: unknown }>} groups - the proposed groups.
- * @returns {string} the markdown, or '' when there is nothing usable.
- */
-export function renderTaskMarkdown(groups) {
-	const sections = [];
-	let section = 0;
-	for (const raw of Array.isArray(groups) ? groups : []) {
-		if (raw === null || typeof raw !== 'object') continue;
-		const items = (Array.isArray(raw.items) ? raw.items : [])
-			.map((item) => (typeof item === 'string' ? item.trim() : ''))
-			.filter((item) => item.length > 0);
-		if (items.length === 0) continue;
-		section += 1;
-		const group = typeof raw.group === 'string' && raw.group.trim().length > 0 ? raw.group.trim() : `任务组 ${section}`;
-		const lines = items.map((item, index) => `- [ ] ${section}.${index + 1} ${item}`);
-		sections.push(`## ${section}. ${group}\n\n${lines.join('\n')}`);
-	}
-	return sections.length === 0 ? '' : `${sections.join('\n\n')}\n`;
-}
-
-/**
- * Check one normalized entry for the mistakes the OpenSpec validator rejects.
- *
- * This runs while the plan is still a proposal, so a plan that would fail
- * validation is flagged in the review step instead of after the user has already
- * confirmed it. It is a lint, not a proof: `openspec validate` still runs on the
- * created change, and its verdict is what the change record reports.
- *
- * @param {object} entry - a normalized entry.
- * @returns {string[]} one message per problem found.
- */
-export function lintEntry(entry) {
-	const problems = [];
-	if (entry.title.trim().length === 0) problems.push('没有标题');
-	if (!/^[a-z0-9][a-z0-9-]*$/.test(entry.id)) problems.push(`id "${entry.id}" 不是合法的 kebab-case`);
-	if (!/[-*]\s*\[[ xX]\]/.test(entry.tasks)) problems.push('tasks 里没有任何 `- [ ]` 复选框任务，迭代循环无法统计进度');
-	if (entry.specs.length === 0) {
-		// A change that alters no external behaviour is legitimate and gets
-		// `skip_specs: true`; one that wrote a spec file but no requirements is not.
-		return problems;
-	}
-	for (const spec of entry.specs) {
-		const requirements = [...spec.content.matchAll(/^###\s+Requirement:\s*(.*)$/gm)];
-		if (requirements.length === 0) {
-			problems.push(`${spec.capability}：没有任何 \`### Requirement:\``);
-			continue;
-		}
-		for (const [index, match] of requirements.entries()) {
-			const start = match.index + match[0].length;
-			const end = index + 1 < requirements.length ? requirements[index + 1].index : spec.content.length;
-			if (!/^####\s+Scenario:/m.test(spec.content.slice(start, end))) {
-				problems.push(`${spec.capability}：「${match[1].trim() || '(未命名)'}」下面没有 \`#### Scenario:\``);
-			}
-		}
-	}
-	return problems;
-}
-
-/**
- * Validate and normalize a raw plan into the entries the writer can use.
+ * Validate and normalize a raw plan into the entries the creator can use.
  *
  * Everything the model controls is treated as hostile input here: the id is
- * kebab-cased and de-duplicated, the artifact bodies must be strings, and an
- * entry with no usable tasks is dropped rather than created as a change the loop
- * can never finish.
+ * kebab-cased and de-duplicated, and an entry with no usable id or title is
+ * dropped rather than handed to the agent as a change nobody can name.
  *
  * @param {object} plan - the tool arguments the agent sent.
  * @param {string[]} taken - ids already in use, which new ids must avoid.
- * @returns {{ entries: object[], dropped: object[], filled: string[] }} the accepted
- *   entries, the rejected ones, and the ids that got a template proposal.md.
+ * @returns {{ entries: object[], dropped: object[] }} the accepted entries and the rejected ones.
  */
 export function normalizeProposal(plan, taken) {
 	const rawList = Array.isArray(plan?.changes) ? plan.changes : [];
 	const used = new Set(taken);
 	const entries = [];
 	const dropped = [];
-	/** Ids whose proposal.md fell back to the template, for the tool to report. */
-	const filled = [];
 	for (const raw of rawList) {
 		if (raw === null || typeof raw !== 'object') {
 			dropped.push({ reason: '条目不是对象' });
@@ -203,52 +105,31 @@ export function normalizeProposal(plan, taken) {
 			id = `${base}-${suffix}`;
 			suffix += 1;
 		}
-		// The structured form is what the tool schema asks for; a raw markdown
-		// string is accepted too, because a model that has already written the
-		// file tends to paste the file.
-		const tasks =
-			typeof raw.tasks === 'string'
-				? raw.tasks
-				: renderTaskMarkdown(Array.isArray(raw.tasks) ? raw.tasks : raw.taskGroups);
-		if (!/[-*]\s*\[[ xX]\]/.test(tasks)) {
-			dropped.push({ id, reason: 'tasks 里没有任何 `- [ ]` 复选框任务，迭代循环无法统计进度' });
+		const title = typeof raw.title === 'string' && raw.title.trim().length > 0 ? raw.title.trim() : '';
+		if (title.length === 0) {
+			// The title is what the change list and the plan review both show; an
+			// untitled entry would appear as a bare id in both.
+			dropped.push({ id, reason: '没有标题' });
 			continue;
 		}
-		const specs = (Array.isArray(raw.specs) ? raw.specs : [])
-			.map((spec) => {
-				if (spec === null || typeof spec !== 'object') return undefined;
-				const capability = String(spec.capability ?? spec.path ?? '')
-					.trim()
-					.replace(/^\/+|\/+$/g, '');
-				if (capability.length === 0 || typeof spec.content !== 'string' || spec.content.trim().length === 0) {
-					return undefined;
-				}
-				return { capability, content: spec.content };
-			})
-			.filter((spec) => spec !== undefined);
 		used.add(id);
-		// An omitted proposal.md gets the schema's own template rather than an empty
-		// file: the artifact is part of what makes a change a change, and a stub with
-		// the right headings is something the loop can fill in, while a blank file is
-		// something it has to notice first.
-		const proposal = typeof raw.proposal === 'string' ? raw.proposal : '';
-		if (proposal.trim().length === 0) filled.push(id);
 		entries.push({
 			id,
-			title: typeof raw.title === 'string' && raw.title.trim().length > 0 ? raw.title.trim() : id,
+			title,
 			summary: typeof raw.summary === 'string' ? raw.summary.trim() : '',
-			proposal: proposal.trim().length === 0 ? TEMPLATES.proposal : proposal,
-			design: typeof raw.design === 'string' ? raw.design : '',
-			tasks,
-			specs,
 		});
 	}
-	return { entries, dropped, filled };
+	return { entries, dropped };
 }
 
 /**
- * The artifact contract the agent must follow, shared by every prompt that asks
- * for a plan so the rules cannot drift between the opener and the nudge.
+ * The plan contract the agent must follow, shared by every prompt that asks for a
+ * plan so the rules cannot drift between the opener and the nudge.
+ *
+ * The rules are about the *split*, not about file formats. What the artifacts
+ * must contain is the skill's business, and it reads it from the project's own
+ * schema — so repeating templates here would only create a second copy to keep in
+ * sync with the installed CLI.
  *
  * @returns {string} the rules as prompt text.
  */
@@ -256,155 +137,112 @@ export function renderProposalRules() {
 	return [
 		'# 计划要满足的格式',
 		'',
-		'用 `spec_loop_propose` 工具提交计划。每个 change 是：',
+		'用 `spec_loop_propose` 工具提交计划。每个 change 只有三个字段：',
 		'',
 		'```json',
 		'{',
 		'  "id": "kebab-case-id（小写英文，连字符）",',
 		'  "title": "一句话中文标题",',
 		'  "summary": "两三句话：做什么、为什么它该独立成一个 change（有先后依赖就写「依赖：<id>」）",',
-		'  "proposal": "proposal.md 的完整 Markdown",',
-		'  "specs": [{ "capability": "capability-path", "content": "spec.md 的完整 Markdown" }],',
-		'  "design": "design.md 的完整 Markdown",',
-		'  "tasks": [{ "group": "任务分组名", "items": ["任务描述", "任务描述"] }]',
 		'}',
 		'```',
 		'',
-		'`tasks` 用上面这种分组结构，**不要自己写 `- [ ]` 和编号** —— 插件会按顺序生成',
-		'`- [ ] 1.1 …` 这样的复选框，迭代循环就是靠它统计进度的。',
+		'**只提交计划，不要写任何文档正文，也不要自己创建 `openspec/changes/` 目录。**',
+		'proposal.md / specs / design.md / tasks.md 都不由你在这里产出：用户确认之后，插件会让你',
+		`自己调用 \`${CREATE_SKILL}\` 技能（用 \`skill\` 工具加载）去创建这些 change，`,
+		'届时由那个技能按项目自己的 schema 生成四份文档。',
 		'',
-		'项目 schema 是 `spec-driven`（proposal → specs → design → tasks）。四个模板：',
+		'# 拆分的硬性规则',
 		'',
-		'## proposal.md',
-		'```markdown',
-		TEMPLATES.proposal + '```',
+		'- **尽量拆细。**一个 change 只做一件事，能在一次迭代里独立实现、独立验证。宁可多拆几个',
+		'  小的，也不要交一个大而全的 —— 后面每个 change 会被单独跑多轮迭代，拆得细才跑得动。',
+		'- 但也要**拆得有意义**：不能独立验证的碎片不要单独成 change，它们应该合进相邻的那个。',
+		'- 每个 change 必须有自己能观察到的完成状态，否则无法判断迭代有没有进展。',
+		'- `id` 一旦提交就是最终的目录名，创建时会要求技能严格照用，所以取一个能长期存在的名字。',
+		'- 有先后依赖的，写在 `summary` 里（「依赖：<id>」），列表会按你提交的顺序展示。',
 		'',
-		'## specs/<capability-path>/spec.md',
-		'```markdown',
-		TEMPLATES.spec + '```',
-		'',
-		'## design.md',
-		'```markdown',
-		TEMPLATES.design + '```',
-		'',
-		'## tasks.md（由 `tasks` 结构生成，这里只是给你看最终形态）',
-		'```markdown',
-		TEMPLATES.tasks + '```',
-		'',
-		'# 硬性规则',
-		'',
-		'- 每个 `### Requirement:` 下面必须至少有一个 `#### Scenario:`（**正好四个井号**），',
-		'  场景用 WHEN / THEN 写；新能力要带 `## Purpose`。插件会在你提交时立刻检查这一条，',
-		'  不符合会被标出来。',
-		'- 每个 change 必须能**独立实现、独立验证**，change 之间尽量不耦合。',
-		'- 如果这个 change 确实不改变任何外部可见行为（纯重构、工具链、文档），就把 `specs`',
-		'  写成空数组 `[]`，插件会给它的 `.openspec.yaml` 加上 `skip_specs: true`。',
-		'  不要为了凑验证而编造需求。',
-		'- `design.md` 只在确实需要时写实质内容（跨模块改动、新增外部依赖、数据模型变化、',
-		'  有安全/性能/迁移复杂度）。简单 change 也保留文件，但可以简短。',
-		'- 只提交计划，**不要自己创建 `openspec/changes/` 目录，也不要自己写这些文件** ——',
-		'  建目录、落盘、校验都由插件在用户确认之后做。',
-		'',
-		'所有文档正文用中文（代码标识符、路径、命令保持原文）。',
+		'所有标题和摘要用中文（代码标识符、路径、命令保持原文）。',
 	].join('\n');
 }
 
 /**
- * Write one validated entry into the repository as an OpenSpec change.
+ * The prompt that sends the agent off to create the confirmed changes.
  *
- * @param {object} options - write inputs.
- * @param {Openspec} options.openspec - the bound CLI.
- * @param {object} options.entry - a normalized plan entry.
- * @returns {Promise<{ id: string, validation: string, warning: string }>} the outcome.
+ * The ids are repeated as an explicit checklist rather than left implicit in the
+ * plan, because the plugin verifies by id afterwards: an agent that renames
+ * `add-dark-mode` to `dark-mode-support` while creating it produces a change the
+ * user never approved under a name the list cannot match to the plan.
+ *
+ * @param {object} options - prompt inputs.
+ * @param {object[]} options.entries - the confirmed plan entries.
+ * @param {string} options.projectPath - the repository to create them in.
+ * @returns {string} the prompt.
  */
-async function writeChange({ openspec, entry }) {
-	const created = await openspec.newChange(entry.id, entry.title);
-	const changeId = typeof created?.change?.id === 'string' ? created.change.id : entry.id;
-	const changeDir = openspec.changeDir(changeId);
-
-	writeFileSync(join(changeDir, 'proposal.md'), ensureTrailingNewline(entry.proposal), 'utf8');
-	writeFileSync(join(changeDir, 'tasks.md'), ensureTrailingNewline(entry.tasks), 'utf8');
-	// design.md is optional in the schema, but writing it when the agent produced
-	// one is more honest than dropping it: the artifact report then reads "written"
-	// instead of "missing", and a later round can fill it in.
-	if (entry.design.trim().length > 0) {
-		writeFileSync(join(changeDir, 'design.md'), ensureTrailingNewline(entry.design), 'utf8');
-	}
-	for (const spec of entry.specs) {
-		const specDir = join(changeDir, 'specs', ...spec.capability.split('/'));
-		mkdirSync(specDir, { recursive: true });
-		writeFileSync(join(specDir, 'spec.md'), ensureTrailingNewline(spec.content), 'utf8');
-	}
-	if (entry.specs.length === 0) {
-		markSkipSpecs(changeDir);
-	}
-
-	let validation = '';
-	let warning = '';
-	try {
-		validation = (await openspec.validate(changeId)).trim();
-	} catch (error) {
-		if (error instanceof OpenspecError) {
-			validation = String(error.detail?.stderr ?? '').trim() || error.message;
-			warning = `openspec validate 未通过：${validation.split('\n').slice(-2).join(' ')}`;
-		} else {
-			warning = `openspec validate 无法执行：${String(error)}`;
-		}
-	}
-	return { id: changeId, validation, warning };
-}
-
-/** Append `skip_specs: true` to a change's metadata, once. */
-function markSkipSpecs(changeDir) {
-	const path = join(changeDir, '.openspec.yaml');
-	let text = '';
-	try {
-		text = readFileSync(path, 'utf8');
-	} catch {
-		text = '';
-	}
-	if (/skip_specs\s*:/.test(text)) return;
-	const appended = text.endsWith('\n') || text.length === 0 ? text : `${text}\n`;
-	writeFileSync(path, `${appended}skip_specs: true\n`, 'utf8');
-}
-
-/** Give an artifact a trailing newline, which every one of these documents has. */
-function ensureTrailingNewline(text) {
-	const value = typeof text === 'string' ? text : '';
-	return value.endsWith('\n') ? value : `${value}\n`;
+export function renderCreationPrompt({ entries, projectPath }) {
+	const lines = [
+		CREATION_MARKER,
+		'',
+		`用户已经确认了下面 ${entries.length} 个 change。现在请你**创建它们**。`,
+		'',
+		`请用 \`skill\` 工具加载 \`${CREATE_SKILL}\` 技能，然后按它的流程逐个创建：`,
+		'',
+		...entries.map((entry, index) => {
+			const summary = entry.summary.length > 0 ? `\n    ${entry.summary.replace(/\n+/g, ' ')}` : '';
+			return `${index + 1}. \`${entry.id}\` —— ${entry.title}${summary}`;
+		}),
+		'',
+		'要求：',
+		'',
+		`- **目录名必须严格等于上面列的 id**，一个字符都不要改、不要加后缀、不要另起名字。`,
+		'  插件会用这些 id 逐个核对，对不上就等于这个 change 没建成。',
+		'- 每个 change 的 `tasks.md` 必须是**真正的 `- [ ]` 复选框列表** —— 后续迭代循环只按',
+		'  这个勾选数统计进展，没有复选框的 change 跑不起来。',
+		'- 只做规划产物，**不要动项目代码**（那个技能本身也是这个边界）。',
+		`- 工作目录是 \`${projectPath}\`。`,
+		'',
+		'全部创建完之后，用中文简短汇报：建了哪几个、每个的 id 是什么、有没有遇到问题。',
+	];
+	return lines.join('\n');
 }
 
 /**
- * The ids a new plan must avoid: the ones this list remembers plus the ones the
- * repository has, because the two drift as soon as somebody creates a change by
- * hand.
- *
- * @param {object} store - the durable store.
- * @param {string} projectPath - the project directory.
- * @returns {string[]} the taken ids.
- */
-export function takenIds(store, projectPath) {
-	return [...new Set([...store.changes(projectPath).map((record) => record.id), ...changeIdsOnDisk(projectPath)])];
-}
-
-/**
- * The proposal operations: a validated plan in, change records out.
+ * The proposal operations: a validated plan in, created change records out.
  */
 export class Proposals {
 	/**
 	 * @param {object} options - construction options.
 	 * @param {object} options.store - the durable store.
+	 * @param {object} options.sessions - the session seam, for driving the creating turn.
 	 * @param {(projectPath: string) => string} options.commandFor - the configured CLI command.
+	 * @param {() => boolean} [options.autoApprove] - whether the creating turn skips authorizations.
+	 * @param {number | (() => number)} [options.timeoutMs] - how long the creating turn may
+	 *   run. Defaults to the same budget a loop round gets, because creating a change and
+	 *   finishing a round are comparable work and a second, hidden ceiling would only
+	 *   surprise the user who raised the visible one.
 	 * @param {(message: string) => void} [options.log] - diagnostic sink.
 	 */
-	constructor({ store, commandFor, log = () => {} }) {
+	constructor({ store, sessions, commandFor, autoApprove, timeoutMs, log = () => {} }) {
 		this.store = store;
+		this.sessions = sessions;
 		this.commandFor = commandFor;
+		this.autoApprove = autoApprove ?? (() => true);
+		this.timeoutSetting = timeoutMs ?? (() => 20 * 60 * 1000);
 		this.log = log;
+	}
+
+	/** How long the creating turn may run, resolved per call. */
+	get timeoutMs() {
+		const value = typeof this.timeoutSetting === 'function' ? this.timeoutSetting() : this.timeoutSetting;
+		return Number.isFinite(value) && value > 0 ? value : 20 * 60 * 1000;
 	}
 
 	/**
 	 * Ensure the project has an OpenSpec root, initializing it when it does not.
+	 *
+	 * Initializing a repository is not creating a change, so this stays: the skill
+	 * needs a root to write into, and refusing to make one would turn "this project
+	 * has not adopted OpenSpec yet" into an error the user has to resolve by hand
+	 * before the confirm button can work at all.
 	 *
 	 * @param {Openspec} openspec - the bound CLI.
 	 * @returns {Promise<string>} the project root.
@@ -414,10 +252,10 @@ export class Proposals {
 		if (existing !== undefined) return existing;
 		if (!openspec.available) {
 			throw new ProposalError(
-				`找不到 openspec 命令（配置为 "${openspec.command}"）。请确认已安装 OpenSpec，或在插件设置里指定绝对路径。`,
+				`找不到 \`${openspec.command}\` 命令，无法初始化 OpenSpec。请在项目里装好 OpenSpec CLI，或者用 \`/spec env\` 看诊断。`,
 			);
 		}
-		this.log(`${openspec.projectPath} 还没有 openspec 目录，执行 openspec init`);
+		this.log(`openspec init in ${openspec.projectPath}`);
 		await openspec.init();
 		const root = openspec.root;
 		if (root === undefined) {
@@ -427,70 +265,184 @@ export class Proposals {
 	}
 
 	/**
-	 * Create the confirmed entries as real OpenSpec changes.
+	 * Create the confirmed entries as real OpenSpec changes, by asking the agent.
 	 *
 	 * This is the only place in the plugin that creates changes, and it is reached
-	 * from the user's confirm action alone. Everything it needs was validated when
-	 * the plan was proposed, so a failure here is an environment problem — a
-	 * missing CLI, a permission, a name already taken on disk.
+	 * from the user's confirm action alone. It does not write the change files: it
+	 * drives a turn in which the agent runs the OpenSpec skill, and then holds the
+	 * result to account against `/spec`'s promise — every id the user approved
+	 * exists on disk, and nothing shows up under a name they did not approve.
 	 *
 	 * @param {object} options - the request.
-	 * @param {string} options.projectPath - the repository to write into.
-	 * @param {object[]} options.entries - the confirmed, normalized entries.
+	 * @param {string} options.projectPath - the repository to create them in.
+	 * @param {object[]} options.entries - the confirmed, normalized plan entries.
 	 * @param {number} options.maxIterations - rounds each new change gets.
-	 * @param {string} [options.plannerSessionId] - the session the plan came from.
+	 * @param {string} options.plannerSessionId - the session that will create them.
 	 * @returns {Promise<{ ids: string[], warnings: string[] }>} the outcome.
 	 */
 	async apply({ projectPath, entries, maxIterations, plannerSessionId = '' }) {
 		if (entries.length === 0) throw new ProposalError('没有选中任何 change');
+		if (plannerSessionId.length === 0) {
+			throw new ProposalError('不知道这次确认来自哪个会话，没法让它去创建 change。');
+		}
+
 		const openspec = new Openspec({ projectPath, command: this.commandFor(projectPath), log: this.log });
 		await this.ensureInitialized(openspec);
 
-		const warnings = [];
-		const ids = [];
-		for (const entry of entries) {
-			try {
-				const written = await writeChange({ openspec, entry });
-				ids.push(written.id);
-				if (written.warning.length > 0) warnings.push(`${written.id}：${written.warning}`);
-				this.store.mutate(() => {
-					const record = this.store.ensure(projectPath, written.id, {
-						title: entry.title,
-						summary: entry.summary,
-						maxIterations,
-						plannerSessionId,
-					});
-					record.title = entry.title;
-					record.summary = entry.summary;
-					record.maxIterations = maxIterations;
-					record.validation = written.validation.slice(0, 2000);
-					record.updatedAt = Date.now();
-					if (written.warning.length > 0) record.note = written.warning;
-					record.log = [
-						...(record.log ?? []),
-						{
-							round: 0,
-							kind: 'split',
-							status: 'ok',
-							startedAt: Date.now(),
-							finishedAt: Date.now(),
-							tasksDone: 0,
-							tasksTotal: 0,
-							note: '由需求拆分创建（用户在确认后落盘）',
-						},
-					].slice(-50);
-				});
-			} catch (error) {
-				warnings.push(`${entry.id}：创建失败 —— ${error instanceof Error ? error.message : String(error)}`);
+		// Asking for the skill before spending a turn on it turns "this profile has
+		// no openspec-propose" into one specific sentence, instead of a turn that
+		// discovers the same thing and then has to explain itself.
+		if (typeof this.sessions.skillMissing === 'function') {
+			const missing = await this.sessions.skillMissing(CREATE_SKILL, plannerSessionId, projectPath);
+			if (missing) {
+				throw new ProposalError(
+					`这个会话里没有 \`${CREATE_SKILL}\` 技能，没法用它创建 change。` +
+						'请确认技能已经装好（agent 通过 `skill` 工具加载它），或者换一个装了它的 profile。',
+					{ skill: CREATE_SKILL },
+				);
 			}
 		}
-		if (ids.length === 0) {
-			throw new ProposalError(`确认了 ${entries.length} 个 change，但一个都没能写进仓库。`, { warnings });
+
+		const requested = entries.map((entry) => toKebab(entry.id));
+		const before = new Set(changeIdsOnDisk(projectPath));
+
+		try {
+			await this.sessions.runTurn({
+				sessionId: plannerSessionId,
+				text: renderCreationPrompt({ entries, projectPath }),
+				requestId: `spec-loop-apply-${Date.now()}`,
+				timeoutMs: this.timeoutMs,
+				autoApprove: this.autoApprove(),
+			});
+		} catch (error) {
+			throw new ProposalError(
+				`创建 change 的那一轮没有跑完：${error instanceof Error ? error.message : String(error)}`,
+				{ requested },
+			);
 		}
-		// Re-read progress for every new change, so the list shows real numbers
-		// immediately instead of zeros until the next poll.
-		await this.refreshTasks(projectPath, ids);
+
+		const after = changeIdsOnDisk(projectPath);
+		const present = new Set(after);
+		const ids = requested.filter((id) => present.has(id));
+		const missing = requested.filter((id) => !present.has(id));
+		// A change the agent created under a name nobody approved. It is on disk, so
+		// it exists whether or not the plugin records it — staying quiet about it
+		// would leave the user with a stray change and no idea where it came from.
+		const unexpected = after.filter((id) => !before.has(id) && !requested.includes(id));
+
+		if (ids.length === 0) {
+			// "Nothing was created" would be a lie when the agent created something
+			// under a name it invented — and that stray change is on disk, so the user
+			// needs to be told about it rather than left to find it.
+			const stray =
+				unexpected.length > 0
+					? `仓库里倒是多出了 ${unexpected.join('、')}，但名字和你确认的对不上，所以没有登记。`
+					: '';
+			throw new ProposalError(
+				`确认了 ${entries.length} 个 change，但一个都没按你确认的 id 建出来。` +
+					`请求的 id：${requested.join('、')}。${stray}打开会话看看那一轮卡在哪里。`,
+				{ requested, missing, unexpected, after },
+			);
+		}
+
+		const warnings = [];
+		if (missing.length > 0) {
+			warnings.push(`这些 id 没有出现在仓库里：${missing.join('、')}（可能是技能改了名字，或者没建完）`);
+		}
+		if (unexpected.length > 0) {
+			warnings.push(`仓库里多出了计划外的 change：${unexpected.join('、')}（已建出来，但没有登记进列表）`);
+		}
+
+		for (const id of ids) {
+			const entry = entries.find((candidate) => toKebab(candidate.id) === id);
+			const warning = await this.#register({ openspec, projectPath, id, entry, maxIterations, plannerSessionId });
+			if (warning.length > 0) warnings.push(`${id}：${warning}`);
+		}
+
+		this.log(`created ${ids.length} change(s) in ${projectPath}: ${ids.join(', ')}`);
 		return { ids, warnings };
+	}
+
+	/**
+	 * Record one created change, reading its real state back off the disk.
+	 *
+	 * Everything here is read from the files the skill wrote, never from the plan:
+	 * the plan said what the user wanted, the files say what they got, and only the
+	 * second one can be iterated.
+	 *
+	 * @param {object} options - the change.
+	 * @param {Openspec} options.openspec - the bound CLI.
+	 * @param {string} options.projectPath - the repository.
+	 * @param {string} options.id - the created change id.
+	 * @param {object|undefined} options.entry - the plan entry it came from.
+	 * @param {number} options.maxIterations - rounds the change gets.
+	 * @param {string} options.plannerSessionId - the session that created it.
+	 * @returns {Promise<string>} a warning, or '' when the change is clean.
+	 */
+	async #register({ openspec, projectPath, id, entry, maxIterations, plannerSessionId }) {
+		const changeDir = openspec.changeDir(id);
+		const tasks = readTasks(changeDir);
+		const warnings = [];
+		if (tasks.total === 0) {
+			// The loop counts checkboxes; a change without any is one the loop will
+			// refuse to run. That is worth saying at creation time, while the agent
+			// that wrote it is still the obvious thing to fix.
+			warnings.push('它的 `tasks.md` 里没有 `- [ ]` 复选框，迭代循环没法统计进度，请补上再开始。');
+		}
+
+		// The plugin did not write these files and cannot vouch for their shape, so
+		// the only honest thing it can add is the CLI's own verdict — recorded on the
+		// change, where the page already renders it. This is the check that used to
+		// be a lint over a plan the plugin was about to render; now that the agent
+		// renders it, running the real validator is the part that still means
+		// something.
+		let validation = '';
+		try {
+			validation = (await openspec.validate(id)).trim();
+		} catch (error) {
+			if (error instanceof OpenspecError) {
+				validation = String(error.detail?.stderr ?? '').trim() || error.message;
+				warnings.push(`openspec validate 未通过：${validation.split('\n').slice(-2).join(' ')}`);
+			} else {
+				warnings.push(`openspec validate 无法执行：${String(error)}`);
+			}
+		}
+
+		const summary = readFileSync(join(changeDir, 'proposal.md'), 'utf8');
+		// Keep only what the page shows: the first heading paragraph. The full text
+		// stays in the file, where the loop and the user can both read it.
+		const excerpt = summary.replace(/^#[^\n]*\n+/, '').trim().slice(0, 400);
+
+		this.store.mutate(() => {
+			const record = this.store.ensure(projectPath, id, {
+				title: entry?.title ?? id,
+				summary: entry?.summary ?? excerpt,
+				maxIterations,
+				plannerSessionId,
+			});
+			record.title = entry?.title ?? record.title ?? id;
+			record.summary = entry?.summary ?? excerpt;
+			record.maxIterations = maxIterations;
+			record.tasksTotal = tasks.total;
+			record.tasksDone = tasks.done;
+			record.validation = validation;
+			if (warnings.length > 0) record.note = warnings.join(' ');
+			record.updatedAt = Date.now();
+			record.log = [
+				...(record.log ?? []),
+				{
+					round: 0,
+					kind: 'split',
+					status: 'ok',
+					startedAt: Date.now(),
+					finishedAt: Date.now(),
+					tasksDone: tasks.done,
+					tasksTotal: tasks.total,
+					note: `由需求拆分创建（用户确认后由 \`${CREATE_SKILL}\` 技能落盘）`,
+				},
+			].slice(-50);
+		});
+		return warnings.join(' ');
 	}
 
 	/**
@@ -525,4 +477,9 @@ export class Proposals {
 			}
 		});
 	}
+}
+
+/** Ids already in use in a project: recorded changes plus whatever is on disk. */
+export function takenIds(store, projectPath) {
+	return [...new Set([...store.changes(projectPath).map((record) => record.id), ...changeIdsOnDisk(projectPath)])];
 }
