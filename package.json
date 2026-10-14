@@ -4,6 +4,10 @@
   "description": "Turn one requirement into a set of OpenSpec changes, then drive each change through a configurable ralph iteration loop — with a running list you can watch.",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/krisir/dsh-plugin-spec-loop.git"
+  },
   "keywords": [
     "dsh",
     "dsh-plugin",
